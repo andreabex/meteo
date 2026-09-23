@@ -1,0 +1,340 @@
+:root {
+  --bg-color: #0f1419;
+  --panel-bg: #161b22;
+  --text-color: #c9d1d9;
+  --border-color: #30363d;
+  --accent-color: #58a6ff;
+  --sidebar-width: 260px;
+}
+
+/* Tema "Chiaro": sovrascrive le variabili quando l'utente lo seleziona esplicitamente */
+html.light {
+  --bg-color: #f5f7fa;
+  --panel-bg: #ffffff;
+  --text-color: #1b1f24;
+  --border-color: #d0d7de;
+  --accent-color: #0969da;
+}
+
+/* Tema "Scuro" esplicito: usa le stesse variabili di :root (ridondante ma esplicito) */
+html.dark {
+  --bg-color: #0f1419;
+  --panel-bg: #161b22;
+  --text-color: #c9d1d9;
+  --border-color: #30363d;
+  --accent-color: #58a6ff;
+}
+
+/* Tema "Sistema": segue le preferenze del sistema operativo/browser.
+   Con prefers-color-scheme: dark (o nessuna preferenza) restano i valori scuri di :root. */
+@media (prefers-color-scheme: light) {
+  html.system {
+    --bg-color: #f5f7fa;
+    --panel-bg: #ffffff;
+    --text-color: #1b1f24;
+    --border-color: #d0d7de;
+    --accent-color: #0969da;
+  }
+}
+
+* {
+  box-sizing: border-box;
+  margin: 0;
+  padding: 0;
+}
+
+body {
+  font-family: 'Space Grotesk', sans-serif;
+  background-color: var(--bg-color);
+  color: var(--text-color);
+  display: flex;
+  min-height: 100vh;
+}
+
+/* Gestione Tab Visibili/Nascosti */
+.tab-section {
+  display: none;
+}
+
+.tab-section.active {
+  display: block;
+}
+
+/* Sidebar & Layout generale */
+.sidebar {
+  width: var(--sidebar-width);
+  background: var(--panel-bg);
+  border-right: 1px solid var(--border-color);
+  display: flex;
+  flex-direction: column;
+  position: fixed;
+  top: 0;
+  bottom: 0;
+  left: 0;
+  z-index: 100;
+  transition: transform 0.3s ease;
+}
+
+.sidebar-header {
+  padding: 1.5rem;
+  font-size: 1.2rem;
+  font-weight: bold;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  border-bottom: 1px solid var(--border-color);
+}
+
+.sidebar-close {
+  display: none;
+  background: none;
+  border: none;
+  color: var(--text-color);
+  font-size: 1.2rem;
+  cursor: pointer;
+}
+
+.weather-menu {
+  display: flex;
+  flex-direction: column;
+  padding: 1rem 0;
+  flex-grow: 1;
+  overflow-y: auto;
+}
+
+.weather-menu-item {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 12px 20px;
+  background: transparent;
+  border: none;
+  color: var(--text-color);
+  text-align: left;
+  font-size: 0.95rem;
+  cursor: pointer;
+  transition: background 0.2s;
+}
+
+.weather-menu-item:hover,
+.weather-menu-item.active {
+  background: rgba(88, 166, 255, 0.15);
+  color: var(--accent-color);
+}
+
+.sidebar-settings {
+  padding: 1rem;
+  border-top: 1px solid var(--border-color);
+}
+
+.settings-toggle {
+  width: 100%;
+  padding: 8px;
+  background: transparent;
+  border: 1px solid var(--border-color);
+  color: var(--text-color);
+  border-radius: 6px;
+  cursor: pointer;
+  display: flex;
+  justify-content: space-between;
+}
+
+.settings-panel {
+  margin-top: 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.inp, .sel {
+  width: 100%;
+  padding: 6px 10px;
+  background: var(--bg-color);
+  border: 1px solid var(--border-color);
+  color: var(--text-color);
+  border-radius: 4px;
+}
+
+.btn-primary, .btn-secondary {
+  width: 100%;
+  padding: 8px;
+  border-radius: 6px;
+  border: none;
+  cursor: pointer;
+  font-weight: bold;
+}
+.btn-primary { background: var(--accent-color); color: #fff; }
+.btn-secondary { background: #30363d; color: var(--text-color); }
+
+.main-wrap {
+  margin-left: var(--sidebar-width);
+  flex-grow: 1;
+  padding: 2rem;
+  max-width: calc(100vw - var(--sidebar-width));
+}
+
+.dash-header {
+  display: flex;
+  align-items: center;
+  gap: 15px;
+}
+
+.hamburger {
+  display: none;
+  background: none;
+  border: none;
+  color: var(--text-color);
+  font-size: 1.5rem;
+  cursor: pointer;
+}
+
+.divider {
+  border: 0;
+  height: 1px;
+  background: var(--border-color);
+  margin: 1.5rem 0;
+}
+
+/* Open-Meteo current & plotly */
+.current-weather-wrapper {
+  width: 100%;
+  margin-bottom: 25px;
+}
+
+.current-weather-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(130px, 1fr));
+  gap: 12px;
+  width: 100%;
+}
+
+.weather-card-mini {
+  background: var(--panel-bg);
+  border: 1px solid var(--border-color);
+  padding: 12px 8px;
+  border-radius: 8px;
+  text-align: center;
+}
+
+.weather-card-mini .label {
+  display: block;
+  font-size: 0.8rem;
+  opacity: 0.8;
+  margin-bottom: 6px;
+}
+
+.weather-card-mini .val {
+  font-size: 1.1rem;
+  font-weight: bold;
+}
+
+.charts-wrapper {
+  display: flex;
+  flex-direction: column;
+  gap: 20px;
+  width: 100%;
+}
+
+.chart-box {
+  width: 100%;
+  min-height: 260px;
+  background: var(--panel-bg);
+  border: 1px solid var(--border-color);
+  border-radius: 8px;
+  overflow: hidden;
+}
+
+/* Tuya Dashboard */
+.tuya-chart-card {
+  background: var(--panel-bg);
+  border: 1px solid var(--border-color);
+  border-radius: 8px;
+  padding: 15px;
+}
+
+.tuya-controls, .tuya-sensors-filter {
+  display: flex;
+  gap: 15px;
+  margin-bottom: 15px;
+  flex-wrap: wrap;
+}
+
+.tuya-sensor-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+  gap: 15px;
+}
+
+.tuya-card {
+  background: var(--panel-bg);
+  border: 1px solid var(--border-color);
+  border-radius: 8px;
+  padding: 15px;
+}
+
+.tuya-card-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+}
+
+.tuya-dot {
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+}
+
+.tuya-current {
+  font-size: 1.8rem;
+  font-weight: bold;
+  margin: 10px 0;
+}
+
+.tuya-minmax, .tuya-info-row {
+  display: flex;
+  justify-content: space-between;
+  font-size: 0.85rem;
+  margin-top: 5px;
+}
+
+.battery.high { color: #2ea043; }
+.battery.middle { color: #d29922; }
+.battery.low { color: #f85149; }
+
+iframe {
+  width: 100%;
+  height: 75vh;
+  border: 1px solid var(--border-color);
+  border-radius: 8px;
+}
+
+@media (max-width: 991px) {
+  .sidebar { transform: translateX(-100%); }
+  .sidebar.open { transform: translateX(0); }
+  .sidebar-close, .hamburger { display: block; }
+  .main-wrap { margin-left: 0; max-width: 100vw; padding: 1rem; }
+  .sidebar-overlay.active {
+    position: fixed; top: 0; left: 0; right: 0; bottom: 0;
+    background: rgba(0,0,0,0.5); z-index: 99;
+  }
+}
+
+/* 2 colonne per Tuya su mobile */
+@media (max-width: 576px) {
+  div.tuya-sensor-grid {
+    display: grid !important;
+    grid-template-columns: repeat(2, 1fr) !important;
+    gap: 8px !important;
+  }
+  div.tuya-sensor-grid .tuya-card {
+    padding: 10px !important;
+    min-width: 0 !important;
+  }
+  div.tuya-sensor-grid .tuya-current {
+    font-size: 1.3rem !important;
+  }
+}
+/* Forzo il pannello a nascondersi quando ha l'attributo hidden */
+.settings-panel[hidden] {
+  display: none !important;
+}

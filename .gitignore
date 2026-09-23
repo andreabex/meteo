@@ -1,0 +1,16 @@
+# File di Log
+*.log
+logs/
+
+# Variabili d'ambiente e credenziali (MAI caricarle su GitHub!)
+.env
+config.php
+
+# File temporanei di Python
+__pycache__/
+*.pyc
+tuya/
+
+# Altri file di sistema
+token
+tuyaJson.py
