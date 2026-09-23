@@ -3,18 +3,18 @@ Web app per visualizzare sensore temperatura (base + 3 sonde) basata su Tuya
 Visualizza altresì dati meteo tratti da Open-meteo
 link a vari servizi meteo
 
+Il progetto prevede 
+ - un crontab che rileva i dati dai sensori ogni 15 minuti e li memorizza in un database (cartella service)
+ - una pagina web che rileva i valori dei sensori appena aperta e visualizza i dati memorizzati nel database
+
 
 ## Requisiti
 - MariaDB
 - PHP 8.x
 - Python 3.x + librerie 
 
-## Installazione su un nuovo server
-1. Clone repo: `git clone https://github.com/andreabex/meteo.git [percorso]/meteo`
-2. Configurazione: `cp config.example.php config.php` e modifica i parametri (entrambi files in web/ s>
-3. Database `cd extra` poi  `mysql -u root -p nome_db < database_schema.sql`
-4. nginx: aggiungere quanto contenuto in extra/default al  `sudo nano /etc/nginx/sites-available/defau>
-5. Copiare/aggiungere il contenuto di extra/root in crontab con  `crontab -e` (incollare: */15 * * * *>
+## Importazione 
+clonare il progetto in una cartella /[percorso]/meteo NON ROOT
 
 ## Istallare python tinytuya in venv 
 `cd /[perorso]/meteo/service`
@@ -29,20 +29,30 @@ _______________________________________________________________________________
 2) Se il dipositivo era già stato  registrato passare al punto 5
 3) Recuperare il DEVICE_ID dall'applicazione Tuya su smartphone (menu -> device info)
 4) Registrare il dispositivo sul sito Tuya
-5) Recuperare `ACCESS_ID` e `SECRET_I`D (è diponibile anche il `DEVICE_ID`) 
+5) Recuperare `ACCESS_ID` e `SECRET_ID` (è diponibile anche il `DEVICE_ID`) 
 ______________________________________________________________________________
 ### Questo è in parte spiegato con screenshot in https://pypi.org/project/tinytuya/
 
 ## Recupero local_key
-inserire i valori ottenuti in `genera_config.py` ed eseguirlo:
+Inserire i valori ottenuti in `genera_config.py` ed eseguirlo:
 `cd /[percorso]/meteo/extra`
 `python3 genera_config.py`
 verrà creato il file `config.php`
-Modificare manualmente `config.php` con i propri dati
-Copiare i dati necessari anche in `cd /[percorso]/meteo/service/tuyaJson.py`
 
 ## Modificare
-Adattare nomi dei dispositivi in database_schema.sql
+Modificare manualmente `config.php` con i propri dati
+Copiare i dati necessari anche in tuyaJson.py `cd /[percorso]/meteo/service/tuyaJson.py`
+Adattare nomi dei sensori nello schema del DB `cd /[percorso]/meteo/extra/database_schema.sql`
+
+## Creare Database
+`cd /[percorso]/meteo/extra`
+`mysql -u root -p nome_db < database_schema.sql`
+
+## Configurare Nginx
+aggiungere quanto contenuto in extra/default al default: `sudo nano /etc/nginx/sites-available/default`
+
+## Configurare crontab
+eseguire `crontab -e` incollare `*/15 * * * * /usr/bin/php /var/www/meteo/service/salva_meteo.php >> /var/www/meteo/service/log.log 2>&1`
 
 INFINE:
 
