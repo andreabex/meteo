@@ -5,7 +5,7 @@ link a vari servizi meteo
 
 Il progetto prevede 
  - un crontab che rileva i dati dai sensori ogni 15 minuti e li memorizza in un database (cartella service)
- - una pagina web che rileva i valori dei sensori appena aperta e visualizza i dati memorizzati nel database
+ - una pagina web che appena aperta rileva i valori dei sensori e visualizza i dati memorizzati nel database
 
 
 ## Requisiti
@@ -41,7 +41,11 @@ verrà creato il file `config.php`
 
 ## Modificare
 Modificare manualmente `config.php` con i propri dati
-Copiare i dati necessari anche in tuyaJson.py `cd /[percorso]/meteo/service/tuyaJson.py`
+Copiare i dati necessari anche in tuyaJson.py partendo da file di esempio 
+`nano /[percorso]/meteo/service/tuyaJson.modify.py`
+`mv /[percorso]/meteo/service/tuyaJson.modify.py  /[percorso]/meteo/service/tuyaJson.py`
+`
+
 Adattare nomi dei sensori nello schema del DB `cd /[percorso]/meteo/extra/database_schema.sql`
 
 ## Creare Database

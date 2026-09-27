@@ -58,7 +58,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
       'lon'           => (float)str_replace(',', '.', $_POST['lon'] ?? '8.03'),
       'theme'         => in_array(($_POST['theme'] ?? 'system'), ['system', 'light', 'dark'], true) ? $_POST['theme'] : 'system',
       'setup_done'    => true,
-      'weze_geoid'    => (int)($_POST['weze_geoid'] ?? 73638),
+      'weze_geoid'    => (int)($_POST['weze_geoid'] ?? 74033),
       'forecast_days' => (int)($_POST['forecast_days'] ?? 7),
     ]);
     header('Location: ' . strtok($_SERVER['REQUEST_URI'], '?'));
@@ -606,8 +606,7 @@ function batteryLabel($battery): string { return match (strtolower(trim((string)
                                 let label = context.dataset.label || '';
                                 if (label) { label += ': '; }
                                 if (context.parsed.y !== null) {
-                                    const isHum = context.dataset.yAxisID === 'y1';
-                                    label += context.parsed.y + (isHum ? ' %' : ' gr/m²');
+                                    label += context.parsed.y + ' ' + (context.dataset.unita || '');
                                 }
                                 return label;
                             }
