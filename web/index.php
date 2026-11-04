@@ -1,3 +1,4 @@
+
 <?php
 // Il server ha fuso orario di default diverso (es. Londra/UTC); nel DB le date sono già in ora locale italiana
 
@@ -140,13 +141,32 @@ $periodi_validi = ['24h' => '24 ore', '7d' => '7 giorni', '30d' => '30 giorni', 
 $periodo = $_GET['periodo'] ?? '24h';
 if (!isset($periodi_validi[$periodo])) { $periodo = '24h'; }
 
-$tipi_validi = ['temp' => 'Temperatura', 'hum' => 'Umidità', 'ah' => 'Umidità assoluta'];
+$tipi_validi = ['temp' => 'Temperatura', 'hum' => 'Umidità', 'ah' => 'Umidità assoluta', 'dp' => 'Punto di rugiada'];
 $tipoSel = $_GET['tipo'] ?? ['temp'];
 if (!is_array($tipoSel)) { $tipoSel = [$tipoSel]; }
 $tipoSel = array_values(array_intersect($tipoSel, array_keys($tipi_validi)));
 if (count($tipoSel) === 0) { $tipoSel = ['temp']; }
-// "Umidità assoluta" è esclusiva: se selezionata, ignora eventuali temp/hum arrivati insieme
+// "Umidità assoluta" (g/m³) ha un'unità a sé: è esclusiva e ignora gli altri tipi arrivati insieme.
+// Temperatura, umidità e punto di rugiada si possono invece vedere insieme.
 if (in_array('ah', $tipoSel, true)) { $tipoSel = ['ah']; }
+// Ordine canonico (temp, hum, ah, dp): il primo tipo è quello che riceve banda min-max e media mobile
+$tipoSel = array_values(array_intersect(array_keys($tipi_validi), $tipoSel));
+
+// Dettaglio dei dati: auto (in base all'estensione del periodo), grezzo, orario, giornaliero
+$agg_validi = ['auto' => 'Automatico', 'raw' => 'Grezzo (15 min)', 'hourly' => 'Medie orarie', 'daily' => 'Medie giornaliere'];
+$agg = $_GET['agg'] ?? 'auto';
+if (!isset($agg_validi[$agg])) { $agg = 'auto'; }
+
+// Medie climatiche mensili di riferimento (Imperia, 1991-2020, stazione di Capo Mele, 220 m s.l.m.)
+// Fonte: https://www.climieviaggi.it/clima/italia/imperia
+// Si possono sovrascrivere in config.php definendo $climaMensile (stessa struttura, indici 1..12).
+if (!isset($climaMensile) || !is_array($climaMensile)) {
+    $climaMensile = [
+        'etichetta' => 'Media clim. Imperia 1991-2020',
+        'temp' => [1 => 9.4, 2 => 9.7, 3 => 11.7, 4 => 13.9, 5 => 17.8, 6 => 21.4, 7 => 24.3, 8 => 24.9, 9 => 21.6, 10 => 17.5, 11 => 13.4, 12 => 10.5],
+        'hum'  => [1 => 63, 2 => 63, 3 => 67, 4 => 69, 5 => 70, 6 => 73, 7 => 72, 8 => 70, 9 => 66, 10 => 67, 11 => 64, 12 => 63],
+    ];
+}
 
 $data_inizio_giorno = trim($_GET['data_inizio_giorno'] ?? '');
 $data_inizio_ora    = trim($_GET['data_inizio_ora'] ?? '');
@@ -199,35 +219,235 @@ function umiditaAssoluta(float $tempC, float $humRel): float {
     return 216.7 * $e / ($tempC + 273.15);                    // g/m³
 }
 
-// $grafico[sensore][tipo] = [{t: timestamp_ms, v: valore}, ...]
+// Punto di rugiada (°C) da temperatura (°C) e umidità relativa (%), formula di Magnus
+// (stessi coefficienti di umiditaAssoluta, così le due grandezze sono coerenti)
+function puntoRugiada(float $tempC, float $humRel): float {
+    $b = 17.62;
+    $c = 243.12;
+    $humRel = max($humRel, 0.1); // evita log(0)
+    $gamma = log($humRel / 100.0) + ($b * $tempC) / ($c + $tempC);
+    return $c * $gamma / ($b - $gamma);
+}
+
+// ─── Livello di dettaglio (aggregazione) in base all'estensione del periodo ───
+// <= 3 giorni: dati grezzi; <= 20 giorni: medie orarie; oltre: medie giornaliere con banda min-max
+$stmtSpan = $pdo->query("SELECT MIN(dataora) AS mn, MAX(dataora) AS mx FROM rilevazioni WHERE $wherePeriodo");
+$rowSpan = $stmtSpan->fetch();
+$spanGiorni = ($rowSpan && $rowSpan['mn'] !== null)
+    ? (strtotime($rowSpan['mx']) - strtotime($rowSpan['mn'])) / 86400
+    : 0;
+
+if ($agg === 'auto') {
+    $modoAgg = $spanGiorni <= 3 ? 'raw' : ($spanGiorni <= 20 ? 'hourly' : 'daily');
+} else {
+    $modoAgg = $agg;
+}
+
+// Raggruppa i punti grezzi [{ts, v}] in "secchielli" orari/giornalieri.
+// Giornaliero: restituisce anche minimo e massimo (per la banda); orario: solo la media.
+function aggregaPunti(array $grezzi, string $modo): array {
+    if ($modo === 'raw') {
+        return array_map(fn($p) => ['t' => $p['ts'] * 1000, 'v' => round($p['v'], 2)], $grezzi);
+    }
+    $gruppi = [];
+    foreach ($grezzi as $p) {
+        $chiave = $modo === 'daily' ? date('Y-m-d', $p['ts']) : date('Y-m-d H', $p['ts']);
+        if (!isset($gruppi[$chiave])) {
+            $gruppi[$chiave] = ['somma' => 0.0, 'n' => 0, 'mn' => $p['v'], 'mx' => $p['v']];
+        }
+        $gruppi[$chiave]['somma'] += $p['v'];
+        $gruppi[$chiave]['n']++;
+        $gruppi[$chiave]['mn'] = min($gruppi[$chiave]['mn'], $p['v']);
+        $gruppi[$chiave]['mx'] = max($gruppi[$chiave]['mx'], $p['v']);
+    }
+    $out = [];
+    foreach ($gruppi as $chiave => $g) {
+        // Il punto va al centro del secchiello (mezzogiorno / mezz'ora)
+        $ts = $modo === 'daily' ? strtotime($chiave . ' 12:00:00') : strtotime($chiave . ':30:00');
+        $punto = ['t' => $ts * 1000, 'v' => round($g['somma'] / $g['n'], 2)];
+        if ($modo === 'daily') {
+            $punto['mn'] = round($g['mn'], 2);
+            $punto['mx'] = round($g['mx'], 2);
+        }
+        $out[] = $punto;
+    }
+    return $out;
+}
+
+// $grafico[sensore][tipo] = [{t: timestamp_ms, v: valore[, mn: minimo, mx: massimo]}, ...]
 $grafico = [];
 foreach ($sensori_validi as $sensore => $info) {
     $grafico[$sensore] = [];
     foreach ($tipoSel as $tipo) {
-        if ($tipo === 'ah') {
+        $grezzi = [];
+        if ($tipo === 'ah' || $tipo === 'dp') {
+            // Grandezze derivate: calcolate riga per riga da temperatura e umidità, poi aggregate
             $colT = $info['temp'];
             $colH = $info['hum'];
             $sql = "SELECT dataora, `$colT` AS t, `$colH` AS h FROM rilevazioni WHERE $wherePeriodo AND `$colT` IS NOT NULL AND `$colH` IS NOT NULL ORDER BY dataora ASC";
             $stmt = $pdo->query($sql);
-            $punti = [];
             while ($row = $stmt->fetch()) {
                 $t = (float)$row['t'];
                 $h = (float)$row['h'];
-                $punti[] = ['t' => strtotime($row['dataora']) * 1000, 'v' => round(umiditaAssoluta($t, $h), 2)];
+                $v = $tipo === 'ah' ? umiditaAssoluta($t, $h) : puntoRugiada($t, $h);
+                $grezzi[] = ['ts' => strtotime($row['dataora']), 'v' => $v];
             }
-            $grafico[$sensore][$tipo] = $punti;
-            continue;
+        } else {
+            $colonna = $info[$tipo];
+            $sql = "SELECT dataora, `$colonna` AS valore FROM rilevazioni WHERE $wherePeriodo AND `$colonna` IS NOT NULL ORDER BY dataora ASC";
+            $stmt = $pdo->query($sql);
+            while ($row = $stmt->fetch()) {
+                $grezzi[] = ['ts' => strtotime($row['dataora']), 'v' => (float)$row['valore']];
+            }
         }
-        $colonna = $info[$tipo];
-        $sql = "SELECT dataora, `$colonna` AS valore FROM rilevazioni WHERE $wherePeriodo AND `$colonna` IS NOT NULL ORDER BY dataora ASC";
-        $stmt = $pdo->query($sql);
-        $punti = [];
-        while ($row = $stmt->fetch()) {
-            $punti[] = ['t' => strtotime($row['dataora']) * 1000, 'v' => (float)$row['valore']];
-        }
-        $grafico[$sensore][$tipo] = $punti;
+        $grafico[$sensore][$tipo] = aggregaPunti($grezzi, $modoAgg);
     }
 }
+
+// ─── Sensore esterno e di riferimento (per delta, statistiche e heatmap) ──────
+// Di default "prato" (esterno) e "base" (riferimento); si possono cambiare in config.php
+// definendo $sensoreEsterno e $sensoreRiferimento con le chiavi di $sensori.
+$sensoreEsterno = (isset($sensoreEsterno) && isset($sensori_validi[$sensoreEsterno]))
+    ? $sensoreEsterno : (isset($sensori_validi['prato']) ? 'prato' : null);
+$sensoreRiferimento = (isset($sensoreRiferimento) && isset($sensori_validi[$sensoreRiferimento]))
+    ? $sensoreRiferimento : (isset($sensori_validi['base']) ? 'base' : null);
+// Soglia (°C) per i gradi-giorno di riscaldamento: somma di quanto la media giornaliera sta sotto la soglia
+$sogliaGradiGiorno = (isset($sogliaGradiGiorno) && is_numeric($sogliaGradiGiorno)) ? (float)$sogliaGradiGiorno : 18.0;
+
+function percentile(array $ordinati, float $p): ?float {
+    $n = count($ordinati);
+    if ($n === 0) { return null; }
+    $pos = ($n - 1) * $p;
+    $base = (int)floor($pos);
+    $resto = $pos - $base;
+    return isset($ordinati[$base + 1])
+        ? $ordinati[$base] + $resto * ($ordinati[$base + 1] - $ordinati[$base])
+        : $ordinati[$base];
+}
+
+function mediana(array $v): ?float {
+    if (!$v) { return null; }
+    sort($v);
+    $n = count($v);
+    return $n % 2 ? (float)$v[intdiv($n, 2)] : ($v[$n / 2 - 1] + $v[$n / 2]) / 2;
+}
+
+// Differenza di temperatura esterno − riferimento, aggregata come il grafico principale
+$delta = [];
+if ($sensoreEsterno && $sensoreRiferimento && $sensoreEsterno !== $sensoreRiferimento) {
+    $cE = $sensori_validi[$sensoreEsterno]['temp'];
+    $cR = $sensori_validi[$sensoreRiferimento]['temp'];
+    $sql = "SELECT dataora, `$cE` - `$cR` AS d FROM rilevazioni WHERE $wherePeriodo AND `$cE` IS NOT NULL AND `$cR` IS NOT NULL ORDER BY dataora ASC";
+    $stmt = $pdo->query($sql);
+    $grezzi = [];
+    while ($row = $stmt->fetch()) {
+        $grezzi[] = ['ts' => strtotime($row['dataora']), 'v' => (float)$row['d']];
+    }
+    $delta = aggregaPunti($grezzi, $modoAgg === 'raw' ? 'raw' : $modoAgg);
+}
+$deltaHasData = count($delta) > 0;
+
+// Statistiche di periodo e heatmap giorno × ora per il sensore esterno
+$statEsterno = null;
+$heat = [];
+$heatMin = $heatMax = null;
+if ($sensoreEsterno) {
+    $cT = $sensori_validi[$sensoreEsterno]['temp'];
+    $cH = $sensori_validi[$sensoreEsterno]['hum'];
+
+    $sql = "SELECT DATE(dataora) AS g, MIN(`$cT`) AS mn, MAX(`$cT`) AS mx, AVG(`$cT`) AS av, COUNT(*) AS n FROM rilevazioni WHERE $wherePeriodo AND `$cT` IS NOT NULL GROUP BY DATE(dataora) ORDER BY g ASC";
+    $giorni = $pdo->query($sql)->fetchAll();
+
+    if (count($giorni) > 0) {
+        $sql = "SELECT `$cT` AS v FROM rilevazioni WHERE $wherePeriodo AND `$cT` IS NOT NULL ORDER BY `$cT` ASC";
+        $valori = array_map('floatval', $pdo->query($sql)->fetchAll(PDO::FETCH_COLUMN));
+
+        $sql = "SELECT AVG(`$cH`) FROM rilevazioni WHERE $wherePeriodo AND `$cH` IS NOT NULL";
+        $umMedia = $pdo->query($sql)->fetchColumn();
+
+        $nGiorni = count($giorni);
+        $minimeG = array_map(fn($r) => (float)$r['mn'], $giorni);
+        $massimeG = array_map(fn($r) => (float)$r['mx'], $giorni);
+        $escursioni = array_map(fn($r) => (float)$r['mx'] - (float)$r['mn'], $giorni);
+
+        $gradiGiorno = 0.0;
+        $giorniGelo = 0;
+        $scartoSomma = 0.0;
+        $scartoN = 0;
+        foreach ($giorni as $r) {
+            $gradiGiorno += max(0.0, $sogliaGradiGiorno - (float)$r['av']);
+            if ((float)$r['mn'] <= 0.0) { $giorniGelo++; }
+            $mese = (int)date('n', strtotime($r['g']));
+            if (isset($climaMensile['temp'][$mese])) {
+                $scartoSomma += (float)$r['av'] - (float)$climaMensile['temp'][$mese];
+                $scartoN++;
+            }
+        }
+
+        // Giorni con rilevazioni mancanti: meno dell'80% della mediana dei giorni interni
+        // (primo e ultimo giorno sono parziali per costruzione, quindi non contano)
+        $incompleti = null;
+        if ($nGiorni >= 4) {
+            $interni = array_slice($giorni, 1, -1);
+            $med = mediana(array_map(fn($r) => (int)$r['n'], $interni));
+            $incompleti = 0;
+            foreach ($interni as $r) {
+                if ($med !== null && (int)$r['n'] < 0.8 * $med) { $incompleti++; }
+            }
+            $incompletiSu = count($interni);
+        }
+
+        $idxMin = array_keys($minimeG, min($minimeG))[0];
+        $idxMax = array_keys($massimeG, max($massimeG))[0];
+
+        $statEsterno = [
+            'giorni'      => $nGiorni,
+            'media'       => array_sum($valori) / count($valori),
+            'min'         => min($minimeG),
+            'min_giorno'  => $giorni[$idxMin]['g'],
+            'max'         => max($massimeG),
+            'max_giorno'  => $giorni[$idxMax]['g'],
+            'media_min'   => array_sum($minimeG) / $nGiorni,
+            'media_max'   => array_sum($massimeG) / $nGiorni,
+            'escursione'  => array_sum($escursioni) / $nGiorni,
+            'p10'         => percentile($valori, 0.10),
+            'p90'         => percentile($valori, 0.90),
+            'gradi_giorno' => $gradiGiorno,
+            'giorni_gelo' => $giorniGelo,
+            'um_media'    => ($umMedia !== false && $umMedia !== null) ? (float)$umMedia : null,
+            'scarto_clima' => $scartoN > 0 ? $scartoSomma / $scartoN : null,
+            'incompleti'  => $incompleti,
+            'incompleti_su' => $incompletiSu ?? null,
+        ];
+    }
+
+    // Heatmap: media oraria per giorno (ultimi 60 giorni del periodo), solo se il periodo supera ~1 giorno
+    if ($spanGiorni >= 1.5) {
+        $sql = "SELECT DATE(dataora) AS g, HOUR(dataora) AS h, AVG(`$cT`) AS v FROM rilevazioni WHERE $wherePeriodo AND `$cT` IS NOT NULL GROUP BY DATE(dataora), HOUR(dataora) ORDER BY g ASC, h ASC";
+        $stmt = $pdo->query($sql);
+        while ($row = $stmt->fetch()) {
+            $heat[$row['g']][(int)$row['h']] = round((float)$row['v'], 1);
+        }
+        $heat = array_slice($heat, -60, null, true);
+        foreach ($heat as $ore) {
+            foreach ($ore as $v) {
+                if ($heatMin === null || $v < $heatMin) { $heatMin = $v; }
+                if ($heatMax === null || $v > $heatMax) { $heatMax = $v; }
+            }
+        }
+    }
+}
+
+// Colore della heatmap: dal blu (freddo) al rosso (caldo) passando per ciano, verde e giallo
+function coloreHeat(float $v, float $min, float $max): string {
+    $t = $max > $min ? ($v - $min) / ($max - $min) : 0.5;
+    $t = max(0.0, min(1.0, $t));
+    $hue = (1.0 - $t) * 240; // 240 = blu, 0 = rosso
+    return sprintf('hsl(%d, 75%%, 48%%)', (int)round($hue));
+}
+
+function fmtGiorno(string $ymd): string { return date('d/m', strtotime($ymd)); }
+function fmtNum($v, int $dec = 1): string { return $v === null ? '—' : number_format((float)$v, $dec, ',', ''); }
 
 $tuyaHasData = false;
 foreach ($grafico as $datiSensore) {
@@ -264,6 +484,21 @@ function batteryLabel($battery): string { return match (strtolower(trim((string)
   .tuya-range-group input[type="time"] { min-width: 90px; }
   .tuya-range-apply { padding: 6px 14px; align-self: flex-end; }
   .tuya-tipo-filter { display: flex; gap: 14px; align-items: center; }
+  .tuya-chart-card h3 { margin: 0 0 6px; }
+  .tuya-chart-card h3 small { font-weight: 400; opacity: 0.7; }
+  .tuya-stat-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(190px, 1fr)); gap: 10px; margin-top: 10px; }
+  .tuya-stat { border: 1px solid rgba(128,128,128,0.3); border-radius: 8px; padding: 8px 10px; display: flex; flex-direction: column; gap: 2px; }
+  .tuya-stat span { font-size: 0.74rem; opacity: 0.75; }
+  .tuya-stat strong { font-size: 1.05rem; }
+  .tuya-stat em { font-size: 0.7rem; opacity: 0.65; font-style: normal; }
+  .tuya-heat-scroll { overflow-x: auto; margin-top: 10px; }
+  .tuya-heat { display: grid; grid-template-columns: 48px repeat(24, minmax(14px, 1fr)); gap: 1px; min-width: 460px; font-size: 0.64rem; }
+  .tuya-heat .h-ora, .tuya-heat .h-giorno { opacity: 0.7; text-align: center; line-height: 14px; }
+  .tuya-heat .h-giorno { text-align: right; padding-right: 6px; }
+  .tuya-heat .h-cella { height: 14px; border-radius: 2px; }
+  .tuya-heat .h-cella.vuota { background: rgba(128,128,128,0.15); }
+  .tuya-heat-legend { display: flex; align-items: center; gap: 8px; margin-top: 8px; font-size: 0.72rem; }
+  .tuya-heat-legend .barra { flex: 0 0 160px; height: 10px; border-radius: 5px; background: linear-gradient(to right, hsl(240,75%,48%), hsl(180,75%,48%), hsl(120,75%,48%), hsl(60,75%,48%), hsl(0,75%,48%)); }
 </style>
 <link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
 <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
@@ -374,7 +609,14 @@ function batteryLabel($battery): string { return match (strtolower(trim((string)
             <label><input type="checkbox" name="tipo[]" value="temp" <?= in_array('temp',$tipoSel,true)?'checked':'' ?> onchange="onTipoChange(this)"> Temperatura</label>
             <label><input type="checkbox" name="tipo[]" value="hum" <?= in_array('hum',$tipoSel,true)?'checked':'' ?> onchange="onTipoChange(this)"> Umidità</label>
             <label><input type="checkbox" name="tipo[]" value="ah" <?= in_array('ah',$tipoSel,true)?'checked':'' ?> onchange="onTipoChange(this)"> Umidità assoluta</label>
+            <label><input type="checkbox" name="tipo[]" value="dp" <?= in_array('dp',$tipoSel,true)?'checked':'' ?> onchange="onTipoChange(this)"> Punto di rugiada</label>
           </span>
+
+          <label>Dettaglio:
+            <select name="agg" onchange="this.form.submit()">
+              <?php foreach($agg_validi as $k=>$v): ?><option value="<?=$k?>" <?=$agg===$k?'selected':''?>><?=$v?></option><?php endforeach; ?>
+            </select>
+          </label>
         </form>
       </div>
 
@@ -385,7 +627,25 @@ function batteryLabel($battery): string { return match (strtolower(trim((string)
           <canvas id="tuyaChart"></canvas>
         <?php endif; ?>
       </div>
+      <?php if ($tuyaHasData && $modoAgg !== 'raw'): ?>
+        <p class="tuya-range-label" style="margin-top:8px;">
+          <?= $modoAgg === 'daily' ? 'Medie giornaliere con banda minimo–massimo' : 'Medie orarie' ?>
+          (periodo di <?= number_format($spanGiorni, 1, ',', '') ?> giorni).
+          Il riferimento tratteggiato è la media climatica mensile di Imperia (1991-2020).
+        </p>
+      <?php endif; ?>
     </div>
+
+    <?php if ($deltaHasData): ?>
+    <div class="tuya-chart-card" style="margin-top: 20px;">
+      <h3>↕️ Differenza di temperatura: <?= htmlspecialchars($sensori_validi[$sensoreEsterno]['nome']) ?> − <?= htmlspecialchars($sensori_validi[$sensoreRiferimento]['nome']) ?></h3>
+      <p class="tuya-range-label">Sopra lo zero l'esterno è più caldo del riferimento, sotto è più freddo
+        (utile per decidere quando aprire o chiudere le finestre).</p>
+      <div style="position: relative; height:240px;">
+        <canvas id="deltaChart"></canvas>
+      </div>
+    </div>
+    <?php endif; ?>
 
     <div class="tuya-sensor-grid" style="margin-top: 20px;">
       <?php foreach ($sensori_validi as $k => $s): ?>
@@ -399,6 +659,72 @@ function batteryLabel($battery): string { return match (strtolower(trim((string)
       </article>
       <?php endforeach; ?>
     </div>
+
+    <?php if ($statEsterno): ?>
+    <?php
+      $S = $statEsterno;
+      $nomeEst = htmlspecialchars($sensori_validi[$sensoreEsterno]['nome']);
+      $voci = [
+        ['Temperatura media', fmtNum($S['media']) . ' °C', null],
+        ['Minima del periodo', fmtNum($S['min']) . ' °C', fmtGiorno($S['min_giorno'])],
+        ['Massima del periodo', fmtNum($S['max']) . ' °C', fmtGiorno($S['max_giorno'])],
+        ['Media delle minime giornaliere', fmtNum($S['media_min']) . ' °C', null],
+        ['Media delle massime giornaliere', fmtNum($S['media_max']) . ' °C', null],
+        ['Escursione giornaliera media', fmtNum($S['escursione']) . ' °C', 'massima − minima del giorno'],
+        ['Percentili 10° / 90°', fmtNum($S['p10']) . ' / ' . fmtNum($S['p90']) . ' °C', 'meno sensibili ai picchi isolati'],
+        ['Gradi-giorno (soglia ' . fmtNum($sogliaGradiGiorno, 0) . ' °C)', fmtNum($S['gradi_giorno'], 0), 'somma di quanto la media sta sotto soglia'],
+        ['Giorni di gelo (min ≤ 0 °C)', $S['giorni_gelo'] . ' su ' . $S['giorni'], null],
+      ];
+      if ($S['um_media'] !== null) { $voci[] = ['Umidità media', fmtNum($S['um_media'], 0) . ' %', null]; }
+      if ($S['scarto_clima'] !== null) {
+          $sc = $S['scarto_clima'];
+          $voci[] = ['Scarto dalla media climatica mensile', ($sc > 0 ? '+' : '') . fmtNum($sc) . ' °C', 'rispetto a Imperia 1991-2020 (Capo Mele)'];
+      }
+      if ($S['incompleti'] !== null) {
+          $voci[] = ['Giorni con rilevazioni mancanti', $S['incompleti'] . ' su ' . $S['incompleti_su'], 'meno dell\'80% del normale'];
+      }
+    ?>
+    <div class="tuya-chart-card" style="margin-top: 20px;">
+      <h3>📊 Statistiche del periodo — <?= $nomeEst ?> <small>(<?= (int)$S['giorni'] ?> giorni con dati)</small></h3>
+      <div class="tuya-stat-grid">
+        <?php foreach ($voci as [$etichetta, $valore, $nota]): ?>
+          <div class="tuya-stat">
+            <span><?= htmlspecialchars($etichetta) ?></span>
+            <strong><?= htmlspecialchars($valore) ?></strong>
+            <?php if ($nota): ?><em><?= htmlspecialchars($nota) ?></em><?php endif; ?>
+          </div>
+        <?php endforeach; ?>
+      </div>
+    </div>
+    <?php endif; ?>
+
+    <?php if ($heat && $heatMin !== null): ?>
+    <div class="tuya-chart-card" style="margin-top: 20px;">
+      <details open>
+        <summary><strong>🗓️ Heatmap giorno × ora — <?= htmlspecialchars($sensori_validi[$sensoreEsterno]['nome']) ?></strong>
+          <small>(temperatura media oraria<?= count($heat) >= 60 ? ', ultimi 60 giorni del periodo' : '' ?>)</small></summary>
+        <div class="tuya-heat-scroll">
+          <div class="tuya-heat">
+            <div></div>
+            <?php for ($o = 0; $o < 24; $o++): ?><div class="h-ora"><?= $o % 3 === 0 ? $o : '' ?></div><?php endfor; ?>
+            <?php foreach ($heat as $giorno => $ore): ?>
+              <div class="h-giorno"><?= fmtGiorno($giorno) ?></div>
+              <?php for ($o = 0; $o < 24; $o++): ?>
+                <?php if (isset($ore[$o])): ?>
+                  <div class="h-cella" style="background:<?= coloreHeat($ore[$o], (float)$heatMin, (float)$heatMax) ?>" title="<?= fmtGiorno($giorno) ?> ore <?= $o ?>: <?= fmtNum($ore[$o]) ?> °C"></div>
+                <?php else: ?>
+                  <div class="h-cella vuota" title="<?= fmtGiorno($giorno) ?> ore <?= $o ?>: nessun dato"></div>
+                <?php endif; ?>
+              <?php endfor; ?>
+            <?php endforeach; ?>
+          </div>
+        </div>
+        <div class="tuya-heat-legend">
+          <span><?= fmtNum($heatMin) ?> °C</span><div class="barra"></div><span><?= fmtNum($heatMax) ?> °C</span>
+        </div>
+      </details>
+    </div>
+    <?php endif; ?>
   </section>
 
   <!-- TAB OPEN-METEO -->
@@ -500,9 +826,36 @@ function batteryLabel($battery): string { return match (strtolower(trim((string)
     const tipiSelezionati = <?= json_encode($tipoSel) ?>;
     const sensoreDefaultVisibile = <?= json_encode($sensore_default_visibile) ?>;
 
-    const etichettaUnita = { temp: '°C', hum: '%', ah: 'g/m³' };
-    const stileTratteggio = { temp: [], hum: [6, 3], ah: [2, 2] };
-    const titoloAsseY = { temp: 'Temperatura (°C)', hum: 'Umidità (%)', ah: 'Umidità assoluta (g/m³)' };
+    const modoAgg = <?= json_encode($modoAgg) ?>;
+    const climaMensile = <?= json_encode($climaMensile, JSON_UNESCAPED_UNICODE) ?>;
+
+    const etichettaUnita = { temp: '°C', hum: '%', ah: 'g/m³', dp: '°C' };
+    const etichettaTipo = { temp: 'temp.', hum: 'umidità', ah: 'umid. ass.', dp: 'rugiada' };
+    const stileTratteggio = { temp: [], hum: [6, 3], ah: [2, 2], dp: [2, 2] };
+    const titoloAsseY = { temp: 'Temperatura (°C)', hum: 'Umidità (%)', ah: 'Umidità assoluta (g/m³)', dp: 'Punto di rugiada (°C)' };
+
+    const GIORNO_MS = 24 * 60 * 60 * 1000;
+
+    // Colore con trasparenza per la banda min-max (accetta #rrggbb / #rgb, altrimenti grigio)
+    function coloreConAlpha(colore, alpha) {
+        let h = String(colore || '').replace('#', '');
+        if (h.length === 3) h = h.split('').map(c => c + c).join('');
+        if (!/^[0-9a-fA-F]{6}$/.test(h)) return `rgba(136,136,136,${alpha})`;
+        const n = parseInt(h, 16);
+        return `rgba(${(n >> 16) & 255},${(n >> 8) & 255},${n & 255},${alpha})`;
+    }
+
+    // Media mobile centrata su N punti (solo punti disponibili, ai bordi la finestra si restringe)
+    function mediaMobile(punti, n) {
+        const meta = Math.floor(n / 2);
+        return punti.map((p, i) => {
+            const da = Math.max(0, i - meta);
+            const a = Math.min(punti.length - 1, i + meta);
+            let somma = 0;
+            for (let k = da; k <= a; k++) somma += punti[k].v;
+            return { x: p.t, y: Math.round((somma / (a - da + 1)) * 100) / 100 };
+        });
+    }
 
     const datasets = [];
     let tMin = null, tMax = null;
@@ -517,21 +870,89 @@ function batteryLabel($battery): string { return match (strtolower(trim((string)
                 if (tMax === null || p.t > tMax) tMax = p.t;
             });
 
-            const suffisso = tipiSelezionati.length > 1 ? ` (${etichettaUnita[tipo]})` : '';
+            const nome = nomiSensori[sensore] || sensore;
+            const suffisso = tipiSelezionati.length > 1 ? ` (${etichettaTipo[tipo]})` : '';
+            const colore = coloriSensori[sensore] || '#333';
+            const yAxisID = tipo === 'hum' ? 'y1' : 'y';
+            const nascosto = sensore !== sensoreDefaultVisibile;
+            const gruppo = `${sensore}|${tipo}`; // i dataset dello stesso gruppo si accendono/spengono insieme
+            // Con più tipi insieme banda e media mobile solo sul primo (temperatura), per non affollare il grafico
+            const dettaglioCompleto = tipiSelezionati.length === 1 || tipo === tipiSelezionati[0];
+            const haBanda = modoAgg === 'daily' && dettaglioCompleto && punti.every(p => p.mn !== undefined);
+
+            // Banda minimo–massimo (periodi lunghi): due serie, la seconda riempie fino alla prima
+            if (haBanda) {
+                datasets.push({
+                    label: `${nome}${suffisso} min`,
+                    data: punti.map(p => ({ x: p.t, y: p.mn })),
+                    borderColor: coloreConAlpha(colore, 0.35), borderWidth: 1,
+                    backgroundColor: 'transparent', pointRadius: 0, pointHoverRadius: 3,
+                    fill: false, spanGaps: true, yAxisID, unita: etichettaUnita[tipo] || '',
+                    hidden: nascosto, gruppo, ruolo: 'banda'
+                });
+                datasets.push({
+                    label: `${nome}${suffisso} max`,
+                    data: punti.map(p => ({ x: p.t, y: p.mx })),
+                    borderColor: coloreConAlpha(colore, 0.35), borderWidth: 1,
+                    backgroundColor: coloreConAlpha(colore, 0.16), pointRadius: 0, pointHoverRadius: 3,
+                    fill: '-1', spanGaps: true, yAxisID, unita: etichettaUnita[tipo] || '',
+                    hidden: nascosto, gruppo, ruolo: 'banda'
+                });
+            }
+
+            // Serie principale (grezzi, medie orarie o medie giornaliere)
             datasets.push({
-                label: (nomiSensori[sensore] || sensore) + suffisso,
+                label: nome + suffisso,
                 data: punti.map(p => ({ x: p.t, y: p.v })),
-                borderColor: coloriSensori[sensore] || '#333',
-                backgroundColor: coloriSensori[sensore] || '#333',
+                borderColor: colore,
+                backgroundColor: colore,
                 borderDash: stileTratteggio[tipo] || [],
                 borderWidth: 2,
                 pointRadius: 0,
                 pointHoverRadius: 5,
                 fill: false,
                 spanGaps: true,
+                yAxisID,
+                unita: etichettaUnita[tipo] || '',
+                hidden: nascosto,
+                gruppo, ruolo: 'principale',
+                dettaglio: haBanda ? punti : null // per mostrare min/max nel tooltip
+            });
+
+            // Media mobile su 7 giorni, solo con dati giornalieri e almeno due settimane
+            if (modoAgg === 'daily' && dettaglioCompleto && punti.length >= 14) {
+                datasets.push({
+                    label: `${nome}${suffisso} media mobile 7 gg`,
+                    data: mediaMobile(punti, 7),
+                    borderColor: colore, backgroundColor: colore,
+                    borderWidth: 3.5, borderDash: [], pointRadius: 0, pointHoverRadius: 4,
+                    fill: false, spanGaps: true, tension: 0.3, yAxisID,
+                    unita: etichettaUnita[tipo] || '',
+                    hidden: nascosto, gruppo, ruolo: 'media-mobile'
+                });
+            }
+        }
+    }
+
+    // Riferimento climatico mensile (Imperia): un punto al giorno col valore della media del mese.
+    // Si mostra solo con dati aggregati (periodi oltre 3 giorni) e per temperatura/umidità relativa.
+    if (modoAgg !== 'raw' && tMin !== null) {
+        for (const tipo of ['temp', 'hum']) {
+            if (!tipiSelezionati.includes(tipo) || !climaMensile[tipo]) continue;
+            const serie = [];
+            for (let t = tMin; t <= tMax + GIORNO_MS; t += GIORNO_MS) {
+                const mese = new Date(t).getMonth() + 1;
+                if (climaMensile[tipo][mese] !== undefined) serie.push({ x: t, y: climaMensile[tipo][mese] });
+            }
+            datasets.push({
+                label: (climaMensile.etichetta || 'Media climatica') + (tipiSelezionati.length > 1 ? ` (${etichettaTipo[tipo]})` : ''),
+                data: serie,
+                borderColor: '#9aa4b2', backgroundColor: '#9aa4b2',
+                borderWidth: 1.5, borderDash: [5, 4], pointRadius: 0, pointHoverRadius: 3,
+                fill: false, spanGaps: true, stepped: 'middle',
                 yAxisID: tipo === 'hum' ? 'y1' : 'y',
                 unita: etichettaUnita[tipo] || '',
-                hidden: sensore !== sensoreDefaultVisibile
+                hidden: false, gruppo: `clima|${tipo}`, ruolo: 'clima'
             });
         }
     }
@@ -571,7 +992,7 @@ function batteryLabel($battery): string { return match (strtolower(trim((string)
                 position: 'left',
                 grid: { color: '#30363d' },
                 ticks: { color: '#c9d1d9' },
-                title: { display: tipiSelezionati.length > 1, text: 'Temperatura (°C)', color: '#c9d1d9' }
+                title: { display: tipiSelezionati.length > 1, text: tipiSelezionati.includes('dp') ? 'Temperatura / rugiada (°C)' : 'Temperatura (°C)', color: '#c9d1d9' }
             }
         };
         if (tipiSelezionati.includes('hum')) {
@@ -593,8 +1014,25 @@ function batteryLabel($battery): string { return match (strtolower(trim((string)
                 interaction: { mode: 'nearest', intersect: false, axis: 'x' },
                 plugins: {
                     legend: {
-                        labels: { color: '#c9d1d9' }
-                        // Il click sulla legenda mostra/nasconde i singoli sensori (default Chart.js)
+                        labels: {
+                            color: '#c9d1d9',
+                            // In legenda solo le serie principali e il riferimento climatico:
+                            // banda min-max e media mobile seguono la serie principale
+                            filter: function (item, data) {
+                                const ds = data.datasets[item.datasetIndex];
+                                return ds.ruolo === 'principale' || ds.ruolo === 'clima';
+                            }
+                        },
+                        // Il click sulla legenda mostra/nasconde il sensore insieme alla sua banda e media mobile
+                        onClick: function (e, item, legend) {
+                            const chart = legend.chart;
+                            const gruppo = chart.data.datasets[item.datasetIndex].gruppo;
+                            const visibile = chart.isDatasetVisible(item.datasetIndex);
+                            chart.data.datasets.forEach((ds, i) => {
+                                if (ds.gruppo === gruppo) chart.setDatasetVisibility(i, !visibile);
+                            });
+                            chart.update();
+                        }
                     },
                     tooltip: {
                         enabled: true,
@@ -609,6 +1047,14 @@ function batteryLabel($battery): string { return match (strtolower(trim((string)
                                     label += context.parsed.y + ' ' + (context.dataset.unita || '');
                                 }
                                 return label;
+                            },
+                            // Con le medie giornaliere mostra anche minimo e massimo del giorno
+                            afterLabel: function (context) {
+                                const det = context.dataset.dettaglio;
+                                const p = det && det[context.dataIndex];
+                                if (!p || p.mn === undefined) return '';
+                                const u = context.dataset.unita || '';
+                                return `min ${p.mn} ${u} · max ${p.mx} ${u}`;
                             }
                         }
                     }
@@ -617,6 +1063,68 @@ function batteryLabel($battery): string { return match (strtolower(trim((string)
             }
         });
     }
+})();
+</script>
+<?php endif; ?>
+
+<?php if ($deltaHasData): ?>
+<script>
+(() => {
+    // delta[i] = {t: timestamp_ms, v: differenza media, [mn, mx]}
+    const delta = <?= json_encode($delta) ?>;
+    const giornaliero = <?= json_encode($modoAgg === 'daily') ?>;
+    const canvas = document.getElementById('deltaChart');
+    if (!canvas || !delta.length) return;
+
+    const formatData = ts => new Date(ts).toLocaleString('it-IT', giornaliero
+        ? { day: '2-digit', month: '2-digit', year: '2-digit' }
+        : { day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' });
+    const segno = v => (v > 0 ? '+' : '') + String(v).replace('.', ',');
+
+    new Chart(canvas.getContext('2d'), {
+        type: 'line',
+        data: {
+            datasets: [{
+                label: 'Esterno − riferimento',
+                data: delta.map(p => ({ x: p.t, y: p.v })),
+                borderColor: '#ffa94d',
+                borderWidth: 2,
+                pointRadius: 0,
+                pointHoverRadius: 4,
+                spanGaps: true,
+                tension: 0.2,
+                // Rosso sopra lo zero (esterno più caldo), azzurro sotto (esterno più freddo)
+                fill: { target: 'origin', above: 'rgba(255,107,107,0.25)', below: 'rgba(77,166,255,0.25)' }
+            }]
+        },
+        options: {
+            responsive: true,
+            maintainAspectRatio: false,
+            parsing: false,
+            interaction: { mode: 'nearest', intersect: false, axis: 'x' },
+            plugins: {
+                legend: { display: false },
+                tooltip: {
+                    callbacks: {
+                        title: items => items.length ? formatData(items[0].parsed.x) : '',
+                        label: ctx => ctx.parsed.y === null ? '' : `${segno(ctx.parsed.y)} °C`,
+                        afterLabel: ctx => {
+                            const p = delta[ctx.dataIndex];
+                            return p && p.mn !== undefined ? `min ${segno(p.mn)} °C · max ${segno(p.mx)} °C` : '';
+                        }
+                    }
+                }
+            },
+            scales: {
+                x: { type: 'time', grid: { color: '#30363d' }, ticks: { color: '#c9d1d9', autoSkip: true, maxTicksLimit: 8, maxRotation: 0 } },
+                y: {
+                    grid: { color: ctx => ctx.tick && ctx.tick.value === 0 ? '#8b949e' : '#30363d' },
+                    ticks: { color: '#c9d1d9' },
+                    title: { display: true, text: 'Differenza (°C)', color: '#c9d1d9' }
+                }
+            }
+        }
+    });
 })();
 </script>
 <?php endif; ?>
@@ -635,12 +1143,13 @@ function onPeriodoChange(sel) {
 function onTipoChange(checkbox) {
   const form = checkbox.form;
   const tutte = form.querySelectorAll('input[name="tipo[]"]');
-  if (checkbox.value === 'ah' && checkbox.checked) {
-    // "Umidità assoluta" è esclusiva: deseleziona temperatura/umidità
-    tutte.forEach(cb => { if (cb.value !== 'ah') cb.checked = false; });
-  } else if (checkbox.value !== 'ah' && checkbox.checked) {
-    // Selezionando temp o hum si disattiva l'umidità assoluta
-    tutte.forEach(cb => { if (cb.value === 'ah') cb.checked = false; });
+  const esclusivi = ['ah']; // l'umidità assoluta (g/m³) non si combina con gli altri tipi; temp, umidità e rugiada sì
+  if (esclusivi.includes(checkbox.value) && checkbox.checked) {
+    // Deseleziona tutti gli altri tipi
+    tutte.forEach(cb => { if (cb !== checkbox) cb.checked = false; });
+  } else if (!esclusivi.includes(checkbox.value) && checkbox.checked) {
+    // Selezionando temp o hum si disattivano i tipi esclusivi
+    tutte.forEach(cb => { if (esclusivi.includes(cb.value)) cb.checked = false; });
   }
   form.submit();
 }
