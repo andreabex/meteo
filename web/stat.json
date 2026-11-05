@@ -7,11 +7,16 @@
     "lon": 8.03
   },
   "periodo": "1991-2020",
-  "fonte": "Climi e Viaggi (https://www.climieviaggi.it/clima/italia/imperia), stazione di Capo Mele, 220 m s.l.m.",
-  "generato": "2026-11-04",
-  "note": "Solo medie mensili: la dashboard le interpola in medie settimanali. Per medie settimanali da dati giornalieri, o per un'altra localita', eseguire extra/scraber.py",
+  "fonte": "Open-Meteo Historical Weather API, medie giornaliere",
+  "quota_modello_m": 0.0,
+  "generato": "2026-11-05",
+  "note": "settimanale = 52 blocchi di 7 giorni dal 1 gennaio (l'ultimo di 8), anno non bisestile senza 29 febbraio, smussatura circolare x1; generato da extra/scraber.py",
+  "settimanale": {
+    "temp": [8.41, 8.44, 8.28, 8.14, 8.15, 8.23, 8.41, 8.79, 9.36, 10.12, 10.93, 11.44, 11.92, 12.51, 12.97, 13.66, 14.65, 15.62, 16.47, 17.28, 18.14, 18.96, 19.74, 20.59, 21.57, 22.42, 22.85, 23.05, 23.45, 23.99, 24.24, 24.08, 23.79, 23.43, 22.62, 21.64, 20.76, 19.83, 18.92, 18.15, 17.26, 16.23, 15.47, 14.66, 13.52, 12.31, 11.17, 10.4, 9.9, 9.35, 8.88, 8.52],
+    "hum": [73.3, 73.7, 71.8, 70.1, 70.5, 70.7, 70.5, 72.0, 73.0, 72.6, 73.1, 73.4, 73.5, 74.5, 74.8, 75.5, 77.3, 78.5, 78.7, 78.2, 78.4, 79.5, 80.4, 80.5, 79.9, 79.6, 79.3, 78.9, 78.9, 78.4, 77.9, 77.9, 78.4, 78.0, 76.4, 75.3, 75.5, 76.2, 76.5, 76.9, 76.4, 76.0, 76.9, 76.9, 75.4, 73.9, 73.4, 73.2, 72.6, 72.3, 72.5, 72.5]
+  },
   "mensile": {
-    "temp": [9.4, 9.7, 11.7, 13.9, 17.8, 21.4, 24.3, 24.9, 21.6, 17.5, 13.4, 10.5],
-    "hum": [63, 63, 67, 69, 70, 73, 72, 70, 66, 67, 64, 63]
+    "temp": [8.28, 8.47, 10.84, 13.47, 17.19, 20.86, 23.39, 23.78, 20.37, 16.59, 12.31, 9.18],
+    "hum": [72.0, 71.2, 73.1, 75.8, 78.4, 80.2, 78.8, 77.9, 75.6, 76.7, 74.4, 72.5]
   }
 }
