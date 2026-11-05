@@ -1,4 +1,3 @@
-
 <?php
 // Il server ha fuso orario di default diverso (es. Londra/UTC); nel DB le date sono già in ora locale italiana
 
@@ -157,15 +156,129 @@ $agg_validi = ['auto' => 'Automatico', 'raw' => 'Grezzo (15 min)', 'hourly' => '
 $agg = $_GET['agg'] ?? 'auto';
 if (!isset($agg_validi[$agg])) { $agg = 'auto'; }
 
-// Medie climatiche mensili di riferimento (Imperia, 1991-2020, stazione di Capo Mele, 220 m s.l.m.)
-// Fonte: https://www.climieviaggi.it/clima/italia/imperia
-// Si possono sovrascrivere in config.php definendo $climaMensile (stessa struttura, indici 1..12).
-if (!isset($climaMensile) || !is_array($climaMensile)) {
-    $climaMensile = [
-        'etichetta' => 'Media clim. Imperia 1991-2020',
-        'temp' => [1 => 9.4, 2 => 9.7, 3 => 11.7, 4 => 13.9, 5 => 17.8, 6 => 21.4, 7 => 24.3, 8 => 24.9, 9 => 21.6, 10 => 17.5, 11 => 13.4, 12 => 10.5],
-        'hum'  => [1 => 63, 2 => 63, 3 => 67, 4 => 69, 5 => 70, 6 => 73, 7 => 72, 8 => 70, 9 => 66, 10 => 67, 11 => 64, 12 => 63],
-    ];
+// ─── Medie climatiche di riferimento: file stat.json ─────────────────────────────
+// I dati NON stanno nel codice ma in web/stat.json (stessa cartella di questo file), così si possono
+// aggiornare o sostituire senza toccare index.php. Il file si genera/aggiorna con extra/scraber.py
+// (medie settimanali da dati giornalieri Open-Meteo, per qualsiasi località) oppure si scrive a mano:
+//   { "etichetta": "...", "posizione": {"nome": "...", "lat": 0, "lon": 0}, "periodo": "1991-2020",
+//     "settimanale": {"temp": [52 valori], "hum": [52 valori]},     ← usate se presenti
+//     "mensile":     {"temp": [12 valori], "hum": [12 valori]} }    ← altrimenti interpolate in settimanali
+// Se il file manca o non è valido la pagina funziona lo stesso, senza linea di riferimento né scarto.
+//
+// Perché settimanali e non mensili: usare il valore del mese per tutti i suoi giorni crea un gradino
+// al cambio mese (es. ottobre 17,5 °C → novembre 13,4 °C): l'ultimo giorno di ottobre si risulta "sotto media"
+// e il primo di novembre "sopra", anche se il tempo è lo stesso. Quando nel file ci sono solo le mensili
+// vengono interpolate: ogni valore è collocato a metà del suo mese e tra un mese e il successivo la curva
+// sale o scende in modo continuo (anche da dicembre a gennaio); poi si fa la media su 52 blocchi di 7 giorni
+// (dal 1° gennaio; l'ultimo blocco ha 8 giorni). Sono valori RICAVATI, non misurati: l'errore tipico è di
+// pochi decimi di grado. Le settimanali da scraber.py derivano invece dai dati giornalieri.
+
+// Blocco settimanale (0..51) di una data: i giorni si contano su un anno non bisestile (29 febbraio = 28)
+function bloccoSettimana(int $mese, int $giorno): int {
+    $gm = [31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
+    if ($mese === 2 && $giorno > 28) { $giorno = 28; }
+    $doy0 = array_sum(array_slice($gm, 0, $mese - 1)) + $giorno - 1;   // giorno dell'anno, base 0
+    return min(51, intdiv($doy0, 7));
+}
+
+// Dalle 12 medie mensili (gennaio..dicembre) a 365 valori giornalieri, interpolando tra i centri dei mesi
+function climaGiornalieroDaMensile(array $mensili): array {
+    $mensili = array_values($mensili);
+    $gm = [31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
+    $centri = [];
+    $inizio = 0;
+    foreach ($gm as $m => $n) { $centri[$m] = $inizio + $n / 2; $inizio += $n; }
+
+    // Interpolazione lineare tra i valori collocati al centro di ogni mese (con raccordo dicembre → gennaio)
+    $interpola = function (array $ancore) use ($centri): array {
+        $giornalieri = [];
+        for ($d = 0; $d < 365; $d++) {
+            $x = $d + 0.5;                       // metà giornata
+            $a = 11;                             // ultimo centro di mese non dopo x (prima di metà gennaio: dicembre)
+            for ($m = 0; $m < 12; $m++) { if ($centri[$m] <= $x) { $a = $m; } }
+            $b = ($a + 1) % 12;
+            $xa = $centri[$a]; if ($xa > $x)   { $xa -= 365; }
+            $xb = $centri[$b]; if ($xb < $xa)  { $xb += 365; }
+            $t = ($x - $xa) / ($xb - $xa);
+            $giornalieri[$d] = $ancore[$a] + $t * ($ancore[$b] - $ancore[$a]);
+        }
+        return $giornalieri;
+    };
+
+    // Un'interpolazione semplice "smussa" i picchi (in agosto la media del mese uscirebbe ~0,5 °C sotto quella
+    // della fonte). Si correggono quindi i valori di ancoraggio finché la media di ogni mese della curva
+    // coincide con la media mensile originale (converge in pochi passaggi).
+    $ancore = $mensili;
+    $giornalieri = $interpola($ancore);
+    for ($passo = 0; $passo < 30; $passo++) {
+        $i = 0;
+        $errMax = 0.0;
+        foreach ($gm as $m => $n) {
+            $s = 0.0;
+            for ($k = 0; $k < $n; $k++) { $s += $giornalieri[$i++]; }
+            $err = $mensili[$m] - $s / $n;
+            $ancore[$m] += $err;
+            $errMax = max($errMax, abs($err));
+        }
+        if ($errMax < 0.005) { break; }
+        $giornalieri = $interpola($ancore);
+    }
+    return $giornalieri;
+}
+
+function climaSettimanaleDaMensile(array $mensili): array {
+    $somme = array_fill(0, 52, 0.0);
+    $conta = array_fill(0, 52, 0);
+    foreach (climaGiornalieroDaMensile($mensili) as $d => $v) {
+        $b = min(51, intdiv($d, 7));
+        $somme[$b] += $v;
+        $conta[$b]++;
+    }
+    return array_map(fn($s, $n) => round($s / $n, 2), $somme, $conta);
+}
+
+// Lista di soli numeri con la lunghezza attesa (altrimenti null)
+function serieNumerica($v, int $n): ?array {
+    if (!is_array($v) || count($v) !== $n) { return null; }
+    $v = array_values($v);
+    foreach ($v as $x) { if (!is_int($x) && !is_float($x)) { return null; } }
+    return array_map('floatval', $v);
+}
+
+$statFile = __DIR__ . '/stat.json';
+$statClima = null;
+if (is_readable($statFile)) {
+    $tmpStat = json_decode((string)file_get_contents($statFile), true);
+    if (is_array($tmpStat)) { $statClima = $tmpStat; }
+}
+
+$climaSett = ['etichetta' => 'Media climatica', 'temp' => [], 'hum' => []];
+$climaOrigine = null;      // 'settimanale' (dati giornalieri) | 'mensile' (interpolata) | null (nessun dato)
+$climaDescr = '';          // testo per le note: "Imperia 1991-2020, da dati giornalieri"
+$climaLontano = false;     // true se la località del file è diversa da quella impostata nella pagina
+$climaLuogo = '';
+if ($statClima) {
+    $climaOrigini = [];
+    foreach (['temp', 'hum'] as $k) {
+        $climaSettFile = serieNumerica($statClima['settimanale'][$k] ?? null, 52);
+        if ($climaSettFile !== null) { $climaSett[$k] = $climaSettFile; $climaOrigini[$k] = 'settimanale'; continue; }
+        $climaMensFile = serieNumerica($statClima['mensile'][$k] ?? null, 12);
+        if ($climaMensFile !== null) { $climaSett[$k] = climaSettimanaleDaMensile($climaMensFile); $climaOrigini[$k] = 'mensile'; }
+    }
+    $climaOrigine = $climaOrigini['temp'] ?? ($climaOrigini['hum'] ?? null);
+    if ($climaOrigine !== null) {
+        $climaEtichetta = is_string($statClima['etichetta'] ?? null) ? $statClima['etichetta'] : 'Media climatica';
+        $climaSett['etichetta'] = $climaEtichetta . ($climaOrigine === 'mensile' ? ' · sett. interpolata' : ' · settimanale');
+
+        $climaPos = is_array($statClima['posizione'] ?? null) ? $statClima['posizione'] : [];
+        $climaLuogo = is_string($climaPos['nome'] ?? null) ? $climaPos['nome'] : '';
+        $climaPeriodo = is_string($statClima['periodo'] ?? null) ? $statClima['periodo'] : '';
+        $climaDescr = trim($climaLuogo . ' ' . $climaPeriodo) . ($climaOrigine === 'mensile' ? ', interpolata dalle medie mensili' : ', da dati giornalieri');
+        $climaDescr = ltrim($climaDescr, ', ');
+        if (isset($climaPos['lat'], $climaPos['lon']) && is_numeric($climaPos['lat']) && is_numeric($climaPos['lon'])) {
+            $climaLontano = abs((float)$climaPos['lat'] - $lat) > 0.25 || abs((float)$climaPos['lon'] - $lon) > 0.25;
+        }
+    }
 }
 
 $data_inizio_giorno = trim($_GET['data_inizio_giorno'] ?? '');
@@ -347,6 +460,10 @@ if ($sensoreEsterno && $sensoreRiferimento && $sensoreEsterno !== $sensoreRiferi
 }
 $deltaHasData = count($delta) > 0;
 
+// Scheda del grafico: "andamento" (principale) oppure "confronto" (esterno − riferimento).
+// Il confronto è disponibile solo se ci sono dati; la scelta sopravvive al ricaricamento tramite ?vista=
+$vista = (($_GET['vista'] ?? 'andamento') === 'confronto' && $deltaHasData) ? 'confronto' : 'andamento';
+
 // Statistiche di periodo e heatmap giorno × ora per il sensore esterno
 $statEsterno = null;
 $heat = [];
@@ -377,9 +494,11 @@ if ($sensoreEsterno) {
         foreach ($giorni as $r) {
             $gradiGiorno += max(0.0, $sogliaGradiGiorno - (float)$r['av']);
             if ((float)$r['mn'] <= 0.0) { $giorniGelo++; }
-            $mese = (int)date('n', strtotime($r['g']));
-            if (isset($climaMensile['temp'][$mese])) {
-                $scartoSomma += (float)$r['av'] - (float)$climaMensile['temp'][$mese];
+            // Scarto del giorno dalla media climatica della sua settimana (non del suo mese: niente gradino a fine mese)
+            $tsG = strtotime($r['g']);
+            $norma = $climaSett['temp'][bloccoSettimana((int)date('n', $tsG), (int)date('j', $tsG))] ?? null;
+            if ($norma !== null) {
+                $scartoSomma += (float)$r['av'] - (float)$norma;
                 $scartoN++;
             }
         }
@@ -484,6 +603,10 @@ function batteryLabel($battery): string { return match (strtolower(trim((string)
   .tuya-range-group input[type="time"] { min-width: 90px; }
   .tuya-range-apply { padding: 6px 14px; align-self: flex-end; }
   .tuya-tipo-filter { display: flex; gap: 14px; align-items: center; }
+  .tuya-tabs { display: flex; flex-wrap: wrap; gap: 4px; margin-bottom: 12px; border-bottom: 1px solid rgba(128,128,128,0.3); }
+  .tuya-tab { background: none; border: none; border-bottom: 2px solid transparent; margin-bottom: -1px; padding: 8px 14px; cursor: pointer; color: inherit; font: inherit; opacity: 0.65; }
+  .tuya-tab:hover { opacity: 0.9; }
+  .tuya-tab.active { opacity: 1; font-weight: 600; border-bottom-color: #4da6ff; }
   .tuya-chart-card h3 { margin: 0 0 6px; }
   .tuya-chart-card h3 small { font-weight: 400; opacity: 0.7; }
   .tuya-stat-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(190px, 1fr)); gap: 10px; margin-top: 10px; }
@@ -580,9 +703,33 @@ function batteryLabel($battery): string { return match (strtolower(trim((string)
   <!-- TAB TUYA -->
   <section class="tab-section active" id="tuya-dashboard">
     <h2>🌡️ Meteo Tuya</h2>
+
+    <!-- Riquadri in tempo reale -->
+    <div class="tuya-sensor-grid" style="margin-bottom: 20px;">
+      <?php foreach ($sensori_validi as $k => $s): ?>
+      <?php $dL = $live[$k] ?? ['temp'=>null,'hum'=>null,'battery'=>null]; $st=$statistiche[$k]??[]; ?>
+      <article class="tuya-card">
+        <div class="tuya-card-head"><h3><?=$s['nome']?></h3><span class="tuya-dot" style="background:<?=$s['color']?>"></span></div>
+        <div class="tuya-current"><?=formatTemp($dL['temp'])?></div>
+        <div class="tuya-minmax"><span>min <strong><?=formatTemp($st['temp_min']??null)?></strong></span><span>max <strong><?=formatTemp($st['temp_max']??null)?></strong></span></div>
+        <div class="tuya-info-row"><span>💧 Umidità</span><strong><?=formatHum($dL['hum'])?></strong></div>
+        <div class="tuya-info-row"><span>🔋 Batteria</span><strong class="<?=batteryClass($dL['battery'])?>"><?=batteryLabel($dL['battery'])?></strong></div>
+      </article>
+      <?php endforeach; ?>
+    </div>
+
+    <!-- Grafico: andamento / confronto esterno-interno (schede alternative) -->
     <div class="tuya-chart-card">
+      <?php if ($deltaHasData): ?>
+      <div class="tuya-tabs" role="tablist">
+        <button type="button" class="tuya-tab <?= $vista === 'andamento' ? 'active' : '' ?>" data-vista="andamento" role="tab" onclick="cambiaVista('andamento')">📈 Andamento</button>
+        <button type="button" class="tuya-tab <?= $vista === 'confronto' ? 'active' : '' ?>" data-vista="confronto" role="tab" onclick="cambiaVista('confronto')">↕️ Confronto <?= htmlspecialchars($sensori_validi[$sensoreEsterno]['nome']) ?> − <?= htmlspecialchars($sensori_validi[$sensoreRiferimento]['nome']) ?></button>
+      </div>
+      <?php endif; ?>
+
       <div class="tuya-controls">
         <form method="get" id="tuya-filter-form">
+          <input type="hidden" name="vista" id="vista-input" value="<?= $vista ?>">
           <label>Periodo:
             <select name="periodo" id="periodo-select" onchange="onPeriodoChange(this)">
               <?php foreach($periodi_validi as $k=>$v): ?><option value="<?=$k?>" <?=$periodo===$k?'selected':''?>><?=$v?></option><?php endforeach; ?>
@@ -605,7 +752,7 @@ function batteryLabel($battery): string { return match (strtolower(trim((string)
             <button type="submit" class="btn-primary tuya-range-apply">Applica</button>
           </span>
 
-          <span class="tuya-tipo-filter">
+          <span class="tuya-tipo-filter" id="tipo-filter" style="<?= $vista === 'confronto' ? 'display:none;' : '' ?>">
             <label><input type="checkbox" name="tipo[]" value="temp" <?= in_array('temp',$tipoSel,true)?'checked':'' ?> onchange="onTipoChange(this)"> Temperatura</label>
             <label><input type="checkbox" name="tipo[]" value="hum" <?= in_array('hum',$tipoSel,true)?'checked':'' ?> onchange="onTipoChange(this)"> Umidità</label>
             <label><input type="checkbox" name="tipo[]" value="ah" <?= in_array('ah',$tipoSel,true)?'checked':'' ?> onchange="onTipoChange(this)"> Umidità assoluta</label>
@@ -620,44 +767,42 @@ function batteryLabel($battery): string { return match (strtolower(trim((string)
         </form>
       </div>
 
-      <div style="position: relative; height:360px;">
-        <?php if (!$tuyaHasData): ?>
-          <p>Nessun dato disponibile.</p>
-        <?php else: ?>
-          <canvas id="tuyaChart"></canvas>
+      <div id="vista-andamento" style="<?= $vista === 'andamento' ? '' : 'display:none;' ?>">
+        <div style="position: relative; height:360px;">
+          <?php if (!$tuyaHasData): ?>
+            <p>Nessun dato disponibile.</p>
+          <?php else: ?>
+            <canvas id="tuyaChart"></canvas>
+          <?php endif; ?>
+        </div>
+        <?php if ($tuyaHasData && $modoAgg !== 'raw'): ?>
+          <p class="tuya-range-label" style="margin-top:8px;">
+            <?= $modoAgg === 'daily' ? 'Medie giornaliere con banda minimo–massimo' : 'Medie orarie' ?>
+            (periodo di <?= number_format($spanGiorni, 1, ',', '') ?> giorni).
+            <?php if ($climaOrigine !== null): ?>
+              Il riferimento tratteggiato è la media climatica settimanale<?= $climaDescr !== '' ? ' (' . htmlspecialchars($climaDescr) . ')' : '' ?>.
+            <?php endif; ?>
+          </p>
+        <?php endif; ?>
+        <?php if ($tuyaHasData && $modoAgg !== 'raw' && $climaLontano): ?>
+          <p class="tuya-range-label" style="margin-top:4px; color:#ffa94d;">
+            ⚠️ Le medie climatiche di riferimento sono per <?= htmlspecialchars($climaLuogo !== '' ? $climaLuogo : 'un\'altra località') ?>,
+            diversa dalla località impostata (<?= $city ?>). Rigenerale con:
+            <code>python3 extra/scraber.py --nome "<?= $city ?>" --lat <?= number_format($lat, 2, '.', '') ?> --lon <?= number_format($lon, 2, '.', '') ?></code>
+          </p>
         <?php endif; ?>
       </div>
-      <?php if ($tuyaHasData && $modoAgg !== 'raw'): ?>
-        <p class="tuya-range-label" style="margin-top:8px;">
-          <?= $modoAgg === 'daily' ? 'Medie giornaliere con banda minimo–massimo' : 'Medie orarie' ?>
-          (periodo di <?= number_format($spanGiorni, 1, ',', '') ?> giorni).
-          Il riferimento tratteggiato è la media climatica mensile di Imperia (1991-2020).
-        </p>
-      <?php endif; ?>
-    </div>
 
-    <?php if ($deltaHasData): ?>
-    <div class="tuya-chart-card" style="margin-top: 20px;">
-      <h3>↕️ Differenza di temperatura: <?= htmlspecialchars($sensori_validi[$sensoreEsterno]['nome']) ?> − <?= htmlspecialchars($sensori_validi[$sensoreRiferimento]['nome']) ?></h3>
-      <p class="tuya-range-label">Sopra lo zero l'esterno è più caldo del riferimento, sotto è più freddo
-        (utile per decidere quando aprire o chiudere le finestre).</p>
-      <div style="position: relative; height:240px;">
-        <canvas id="deltaChart"></canvas>
+      <?php if ($deltaHasData): ?>
+      <div id="vista-confronto" style="<?= $vista === 'confronto' ? '' : 'display:none;' ?>">
+        <p class="tuya-range-label">Differenza di temperatura <?= htmlspecialchars($sensori_validi[$sensoreEsterno]['nome']) ?> − <?= htmlspecialchars($sensori_validi[$sensoreRiferimento]['nome']) ?>:
+          sopra lo zero l'esterno è più caldo, sotto è più freddo (utile per decidere quando aprire o chiudere le finestre).
+          Periodo e dettaglio sono quelli scelti sopra<?= $modoAgg === 'daily' ? '; con le medie giornaliere il tooltip riporta anche minimo e massimo del giorno' : '' ?>.</p>
+        <div style="position: relative; height:360px;">
+          <canvas id="deltaChart"></canvas>
+        </div>
       </div>
-    </div>
-    <?php endif; ?>
-
-    <div class="tuya-sensor-grid" style="margin-top: 20px;">
-      <?php foreach ($sensori_validi as $k => $s): ?>
-      <?php $dL = $live[$k] ?? ['temp'=>null,'hum'=>null,'battery'=>null]; $st=$statistiche[$k]??[]; ?>
-      <article class="tuya-card">
-        <div class="tuya-card-head"><h3><?=$s['nome']?></h3><span class="tuya-dot" style="background:<?=$s['color']?>"></span></div>
-        <div class="tuya-current"><?=formatTemp($dL['temp'])?></div>
-        <div class="tuya-minmax"><span>min <strong><?=formatTemp($st['temp_min']??null)?></strong></span><span>max <strong><?=formatTemp($st['temp_max']??null)?></strong></span></div>
-        <div class="tuya-info-row"><span>💧 Umidità</span><strong><?=formatHum($dL['hum'])?></strong></div>
-        <div class="tuya-info-row"><span>🔋 Batteria</span><strong class="<?=batteryClass($dL['battery'])?>"><?=batteryLabel($dL['battery'])?></strong></div>
-      </article>
-      <?php endforeach; ?>
+      <?php endif; ?>
     </div>
 
     <?php if ($statEsterno): ?>
@@ -678,7 +823,7 @@ function batteryLabel($battery): string { return match (strtolower(trim((string)
       if ($S['um_media'] !== null) { $voci[] = ['Umidità media', fmtNum($S['um_media'], 0) . ' %', null]; }
       if ($S['scarto_clima'] !== null) {
           $sc = $S['scarto_clima'];
-          $voci[] = ['Scarto dalla media climatica mensile', ($sc > 0 ? '+' : '') . fmtNum($sc) . ' °C', 'rispetto a Imperia 1991-2020 (Capo Mele)'];
+          $voci[] = ['Scarto dalla media climatica settimanale', ($sc > 0 ? '+' : '') . fmtNum($sc) . ' °C', 'rispetto a ' . ($climaDescr !== '' ? $climaDescr : 'media climatica')];
       }
       if ($S['incompleti'] !== null) {
           $voci[] = ['Giorni con rilevazioni mancanti', $S['incompleti'] . ' su ' . $S['incompleti_su'], 'meno dell\'80% del normale'];
@@ -827,7 +972,17 @@ function batteryLabel($battery): string { return match (strtolower(trim((string)
     const sensoreDefaultVisibile = <?= json_encode($sensore_default_visibile) ?>;
 
     const modoAgg = <?= json_encode($modoAgg) ?>;
-    const climaMensile = <?= json_encode($climaMensile, JSON_UNESCAPED_UNICODE) ?>;
+    const climaSett = <?= json_encode($climaSett, JSON_UNESCAPED_UNICODE) ?>;
+
+    // Blocco settimanale (0..51) di un timestamp: stesso calcolo di bloccoSettimana() in PHP
+    // (anno non bisestile, 29 febbraio = 28; blocchi di 7 giorni dal 1° gennaio, l'ultimo ne ha 8)
+    const GIORNI_CUM = [0, 31, 59, 90, 120, 151, 181, 212, 243, 273, 304, 334];
+    function bloccoSettimana(ts) {
+        const d = new Date(ts);
+        const mese = d.getMonth();
+        const giorno = (mese === 1 && d.getDate() > 28) ? 28 : d.getDate();
+        return Math.min(51, Math.floor((GIORNI_CUM[mese] + giorno - 1) / 7));
+    }
 
     const etichettaUnita = { temp: '°C', hum: '%', ah: 'g/m³', dp: '°C' };
     const etichettaTipo = { temp: 'temp.', hum: 'umidità', ah: 'umid. ass.', dp: 'rugiada' };
@@ -934,18 +1089,18 @@ function batteryLabel($battery): string { return match (strtolower(trim((string)
         }
     }
 
-    // Riferimento climatico mensile (Imperia): un punto al giorno col valore della media del mese.
+    // Riferimento climatico settimanale (Imperia): un punto al giorno col valore della media della sua settimana.
     // Si mostra solo con dati aggregati (periodi oltre 3 giorni) e per temperatura/umidità relativa.
     if (modoAgg !== 'raw' && tMin !== null) {
         for (const tipo of ['temp', 'hum']) {
-            if (!tipiSelezionati.includes(tipo) || !climaMensile[tipo]) continue;
+            if (!tipiSelezionati.includes(tipo) || !climaSett[tipo] || !climaSett[tipo].length) continue;
             const serie = [];
             for (let t = tMin; t <= tMax + GIORNO_MS; t += GIORNO_MS) {
-                const mese = new Date(t).getMonth() + 1;
-                if (climaMensile[tipo][mese] !== undefined) serie.push({ x: t, y: climaMensile[tipo][mese] });
+                const valore = climaSett[tipo][bloccoSettimana(t)];
+                if (valore !== undefined) serie.push({ x: t, y: valore });
             }
             datasets.push({
-                label: (climaMensile.etichetta || 'Media climatica') + (tipiSelezionati.length > 1 ? ` (${etichettaTipo[tipo]})` : ''),
+                label: (climaSett.etichetta || 'Media climatica settimanale') + (tipiSelezionati.length > 1 ? ` (${etichettaTipo[tipo]})` : ''),
                 data: serie,
                 borderColor: '#9aa4b2', backgroundColor: '#9aa4b2',
                 borderWidth: 1.5, borderDash: [5, 4], pointRadius: 0, pointHoverRadius: 3,
@@ -1004,7 +1159,7 @@ function batteryLabel($battery): string { return match (strtolower(trim((string)
             };
         }
 
-        new Chart(canvas.getContext('2d'), {
+        window.tuyaChartInstance = new Chart(canvas.getContext('2d'), {
             type: 'line',
             data: { datasets },
             options: {
@@ -1036,6 +1191,10 @@ function batteryLabel($battery): string { return match (strtolower(trim((string)
                     },
                     tooltip: {
                         enabled: true,
+                        // Le due serie della banda (min e max) non vanno elencate nel tooltip: minimo e massimo
+                        // compaiono già una sola volta nella riga della serie principale (afterLabel).
+                        // Senza questo filtro comparivano due volte (serie "min"/"max" + riga della principale).
+                        filter: function (item) { return item.dataset.ruolo !== 'banda'; },
                         callbacks: {
                             title: function (items) {
                                 return items.length ? formatEtichettaData(items[0].parsed.x) : '';
@@ -1081,7 +1240,7 @@ function batteryLabel($battery): string { return match (strtolower(trim((string)
         : { day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' });
     const segno = v => (v > 0 ? '+' : '') + String(v).replace('.', ',');
 
-    new Chart(canvas.getContext('2d'), {
+    window.deltaChartInstance = new Chart(canvas.getContext('2d'), {
         type: 'line',
         data: {
             datasets: [{
@@ -1130,6 +1289,28 @@ function batteryLabel($battery): string { return match (strtolower(trim((string)
 <?php endif; ?>
 
 <script>
+// Passa dalla scheda "Andamento" a "Confronto" senza ricaricare la pagina.
+// Il valore va anche nel campo nascosto del form, così resta scelto quando si cambia periodo/dettaglio.
+function cambiaVista(vista) {
+  const input = document.getElementById('vista-input');
+  if (input) input.value = vista;
+
+  document.querySelectorAll('.tuya-tab').forEach(t => t.classList.toggle('active', t.dataset.vista === vista));
+
+  const andamento = document.getElementById('vista-andamento');
+  const confronto = document.getElementById('vista-confronto');
+  if (andamento) andamento.style.display = vista === 'andamento' ? '' : 'none';
+  if (confronto) confronto.style.display = vista === 'confronto' ? '' : 'none';
+
+  // La scelta dei tipi (temp/umidità/rugiada) vale solo per il grafico dell'andamento
+  const tipi = document.getElementById('tipo-filter');
+  if (tipi) tipi.style.display = vista === 'andamento' ? '' : 'none';
+
+  // Un grafico nascosto ha dimensione 0: va ridimensionato quando torna visibile
+  const chart = vista === 'andamento' ? window.tuyaChartInstance : window.deltaChartInstance;
+  if (chart) chart.resize();
+}
+
 function onPeriodoChange(sel) {
   const wrap = document.getElementById('custom-range-wrap');
   if (sel.value === 'custom') {
