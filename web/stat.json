@@ -1,0 +1,17 @@
+{
+  "versione": 1,
+  "etichetta": "Media clim. Imperia 1991-2020",
+  "posizione": {
+    "nome": "Imperia",
+    "lat": 43.88,
+    "lon": 8.03
+  },
+  "periodo": "1991-2020",
+  "fonte": "Climi e Viaggi (https://www.climieviaggi.it/clima/italia/imperia), stazione di Capo Mele, 220 m s.l.m.",
+  "generato": "2026-11-04",
+  "note": "Solo medie mensili: la dashboard le interpola in medie settimanali. Per medie settimanali da dati giornalieri, o per un'altra localita', eseguire extra/scraber.py",
+  "mensile": {
+    "temp": [9.4, 9.7, 11.7, 13.9, 17.8, 21.4, 24.3, 24.9, 21.6, 17.5, 13.4, 10.5],
+    "hum": [63, 63, 67, 69, 70, 73, 72, 70, 66, 67, 64, 63]
+  }
+}
