@@ -58,6 +58,18 @@ aggiungere quanto contenuto in extra/default al default: `sudo nano /etc/nginx/s
 ## Configurare crontab
 eseguire `crontab -e` incollare `*/15 * * * * /usr/bin/php /var/www/meteo/service/salva_meteo.php >> /var/www/meteo/service/log.log 2>&1`
 
+## Medie climatiche di riferimento (`web/stat.json`)
+La linea tratteggiata "media climatica" nel grafico e lo "scarto dalla media climatica" usano i dati del file `web/stat.json`.
+Il file fornito contiene le **medie mensili di Imperia** (1991-2020, stazione di Capo Mele): la dashboard le interpola in medie settimanali, così non c'è il "gradino" al cambio di mese.
+
+**Se la tua località è diversa**, o per avere medie settimanali vere calcolate da dati giornalieri, genera il file con `extra/scraber.py`. Scarica da Open-Meteo gli anni 1991-2020 (gratuito, senza chiave; solo libreria standard, non serve il venv):
+
+`python3 /[percorso]/meteo/extra/scraber.py --nome "Genova" --lat 44.41 --lon 8.93`
+
+Per aggiornare il file senza ripetere la località basta `python3 extra/scraber.py`. Opzioni utili: `--da` e `--a` (anni), `--modello` (es. `era5_land`), `--smussa` (0 = nessuna smussatura), `--dry-run` (mostra il risultato senza scrivere).
+
+Sono dati di rianalisi su griglia (circa 10-25 km), non misure di una stazione: la quota della cella usata dal modello è salvata nel file (`quota_modello_m`) e vicino alla costa o in montagna possono esserci scarti sistematici. Se la località impostata nella pagina non coincide con quella di `stat.json`, sotto il grafico compare un avviso con il comando da lanciare. Il file si può anche scrivere a mano (formato descritto nei commenti all'inizio di `web/index.php`).
+
 INFINE:
 
 dal brower chiamare localhost:1000
