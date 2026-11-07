@@ -464,6 +464,28 @@ $deltaHasData = count($delta) > 0;
 // Il confronto è disponibile solo se ci sono dati; la scelta sopravvive al ricaricamento tramite ?vista=
 $vista = (($_GET['vista'] ?? 'andamento') === 'confronto' && $deltaHasData) ? 'confronto' : 'andamento';
 
+// ─── Riquadro "Pioggia" (dati Open-Meteo, perché i sensori Tuya non misurano la pioggia) ───
+// Passa a JavaScript (app.js, caricaPioggiaTuya) il periodo scelto per il grafico. Per 24h/7d/30d la finestra
+// è relativa a "adesso" e la calcola JS con l'ora locale di Open-Meteo; per "tutto" e "personalizzato" servono
+// le date: sono quelle della query sul database (ora locale, come i dati dei sensori).
+$pioggiaCfg = ['tipo' => $periodo, 'da' => null, 'a' => null, 'etichetta' => $periodi_validi[$periodo] ?? ''];
+if ($periodo === 'all') {
+    if ($rowSpan && $rowSpan['mn'] !== null) {
+        $pioggiaCfg['da'] = date('Y-m-d\TH:i', strtotime($rowSpan['mn']));
+        $pioggiaCfg['etichetta'] = 'dal ' . date('d/m/Y', strtotime($rowSpan['mn']));
+    }
+} elseif ($periodo === 'custom') {
+    if (isset($dIni, $dFin)) {
+        $pioggiaCfg['da'] = date('Y-m-d\TH:i', strtotime($dIni));
+        $pioggiaCfg['a'] = date('Y-m-d\TH:i', strtotime($dFin));
+        $pioggiaCfg['etichetta'] = date('d/m', strtotime($dIni)) . '–' . date('d/m', strtotime($dFin));
+    } else {
+        // Range personalizzato non valido: la pagina ripiega sulle ultime 24 ore (vedi $wherePeriodo)
+        $pioggiaCfg['tipo'] = '24h';
+        $pioggiaCfg['etichetta'] = $periodi_validi['24h'];
+    }
+}
+
 // Statistiche di periodo e heatmap giorno × ora per il sensore esterno
 $statEsterno = null;
 $heat = [];
@@ -716,6 +738,15 @@ function batteryLabel($battery): string { return match (strtolower(trim((string)
         <div class="tuya-info-row"><span>🔋 Batteria</span><strong class="<?=batteryClass($dL['battery'])?>"><?=batteryLabel($dL['battery'])?></strong></div>
       </article>
       <?php endforeach; ?>
+
+      <!-- Pioggia da Open-Meteo (i sensori Tuya non la misurano): ultima ora e periodo scelto, riempito da app.js -->
+      <article class="tuya-card" id="pioggia-card" title="Dati del modello meteo Open-Meteo, non misurati: caricamento...">
+        <div class="tuya-card-head"><h3>Pioggia</h3><span class="tuya-dot" style="background:#4da6ff"></span></div>
+        <div class="tuya-current" id="pioggia-ora">—</div>
+        <div class="tuya-minmax"><span id="pioggia-ora-label">ultima ora</span></div>
+        <div class="tuya-info-row"><span id="pioggia-periodo-label">Periodo (<?= htmlspecialchars($pioggiaCfg['etichetta']) ?>)</span><strong id="pioggia-periodo">—</strong></div>
+        <div class="tuya-info-row"><span>🛰️ Fonte</span><strong>Open-Meteo</strong></div>
+      </article>
     </div>
 
     <!-- Grafico: andamento / confronto esterno-interno (schede alternative) -->
@@ -1368,6 +1399,8 @@ const WEATHER_CONFIG = {
   forecast_days: <?= json_encode($forecast_days) ?>,
   theme: <?= json_encode($theme) ?>
 };
+// Periodo scelto per il riquadro "Pioggia" del primo tab (vedi caricaPioggiaTuya in app.js)
+const PIOGGIA_CONFIG = <?= json_encode($pioggiaCfg, JSON_UNESCAPED_UNICODE) ?>;
 </script>
 <script src="app.js?v=<?= filemtime('app.js') ?>"></script>
 <?php endif; ?>

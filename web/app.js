@@ -48,6 +48,7 @@ document.addEventListener('DOMContentLoaded', () => {
   }
 
   loadOpenMeteoData();
+  caricaPioggiaTuya();
 
   // Ridisegna i grafici (senza rifare le chiamate API) quando cambia la
   // larghezza della finestra, così la legenda passa da verticale (desktop,
@@ -313,12 +314,35 @@ function buildAllCharts(hourly, times) {
    Caricamento dati da Open-Meteo
    ═══════════════════════════════════════════════════════ */
 
+// Pioggia caduta oggi fino all'ultima ora conclusa (mm), oppure null se non calcolabile.
+// "current.precipitation" NON è il totale del giorno: è la pioggia dell'ultimo intervallo (pochi minuti
+// o un'ora), quindi vale 0 appena smette di piovere anche se è piovuto per ore. Per "Pioggia oggi" si
+// sommano i valori orari da mezzanotte. Nei dati orari di Open-Meteo il valore con orario H è la somma
+// dell'ora precedente (H-1, H], quindi quello delle 00:00 appartiene a ieri e si esclude.
+// Sono dati del modello meteo, non misure del tuo pluviometro.
+function pioggiaOggi(data) {
+  const h = data && data.hourly;
+  const c = data && data.current;
+  if (!h || !Array.isArray(h.time) || !Array.isArray(h.precipitation) || !c || typeof c.time !== 'string') return null;
+  const giorno = c.time.slice(0, 10);                  // data locale (timezone=auto), es. "2026-11-06"
+  let somma = 0;
+  let ore = 0;
+  h.time.forEach((t, i) => {
+    const v = h.precipitation[i];
+    if (typeof v === 'number' && t.slice(0, 10) === giorno && t > giorno + 'T00:00' && t <= c.time) {
+      somma += v;
+      ore++;
+    }
+  });
+  return ore > 0 ? Math.round(somma * 10) / 10 : null;
+}
+
 async function loadOpenMeteoData() {
   if (typeof WEATHER_CONFIG === 'undefined') return;
 
   clearWeatherError();
 
-  const urlCurrent = `https://api.open-meteo.com/v1/forecast?latitude=${WEATHER_CONFIG.lat}&longitude=${WEATHER_CONFIG.lon}&current=temperature_2m,relative_humidity_2m,surface_pressure,wind_speed_10m,precipitation&timezone=auto`;
+  const urlCurrent = `https://api.open-meteo.com/v1/forecast?latitude=${WEATHER_CONFIG.lat}&longitude=${WEATHER_CONFIG.lon}&current=temperature_2m,relative_humidity_2m,surface_pressure,wind_speed_10m,precipitation&hourly=precipitation&forecast_days=1&timezone=auto`;
   const hourlyVars = [
     'temperature_2m', 'precipitation', 'wind_speed_10m',
     'temperature_850hPa', 'geopotential_height_850hPa',
@@ -337,7 +361,16 @@ async function loadOpenMeteoData() {
       document.getElementById('curr-hum').textContent = `${dataCurr.current.relative_humidity_2m} %`;
       document.getElementById('curr-press').textContent = `${dataCurr.current.surface_pressure} hPa`;
       document.getElementById('curr-wind').textContent = `${dataCurr.current.wind_speed_10m} km/h`;
-      document.getElementById('curr-precip').textContent = `${dataCurr.current.precipitation} mm`;
+      // Pioggia di oggi (somma delle ore concluse); se i dati orari mancano si ripiega sull'ultimo intervallo
+      const piovuto = pioggiaOggi(dataCurr);
+      const elPioggia = document.getElementById('curr-precip');
+      elPioggia.textContent = `${piovuto !== null ? piovuto : dataCurr.current.precipitation} mm`;
+      if (elPioggia.parentElement) {
+        elPioggia.parentElement.title = (piovuto !== null
+          ? 'Somma della pioggia oraria da mezzanotte all\'ultima ora conclusa (dati del modello, non misurati). '
+          : 'Dati orari non disponibili: mostro solo la pioggia dell\'ultimo intervallo. ')
+          + `Ultimo intervallo: ${dataCurr.current.precipitation} mm`;
+      }
     }
   } catch (e) {
     console.error('Errore dati attuali:', e);
@@ -360,5 +393,161 @@ async function loadOpenMeteoData() {
   } catch (e) {
     console.error('Errore recupero grafici Open-Meteo:', e);
     showWeatherError(`Grafici ensemble non disponibili (${e.message}).`);
+  }
+}
+
+/* ═══════════════════════════════════════════════════════
+   Riquadro "Pioggia" del primo tab (Tuya): ultima ora e periodo scelto, da Open-Meteo
+   ═══════════════════════════════════════════════════════ */
+
+// I sensori Tuya non misurano la pioggia: si usano i dati orari del modello Open-Meteo (non misure del
+// giardino). Convenzione di Open-Meteo: il valore orario con orario H è la somma dell'ora precedente (H-1, H].
+// L'API "forecast" restituisce fino a 92 giorni indietro (past_days); per periodi più lunghi la parte
+// più vecchia viene presa dall'archivio storico (archive-api), che ha qualche giorno di ritardo ma qui
+// serve solo per date lontane.
+const PIOGGIA_MAX_GIORNI_RECENTI = 92;
+const PIOGGIA_MS_ORA = 3600000;
+
+// "YYYY-MM-DDTHH:MM" (ora locale, senza fuso) -> millisecondi trattando i campi come UTC:
+// così somme e sottrazioni di ore sono esatte e non dipendono dal fuso del browser.
+function pioggiaMs(s) {
+  const m = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2})/.exec(String(s || ''));
+  return m ? Date.UTC(+m[1], +m[2] - 1, +m[3], +m[4], +m[5]) : NaN;
+}
+
+function pioggiaFmt(ms) {
+  return new Date(ms).toISOString().slice(0, 16);
+}
+
+// Finestra (da, a] del periodo scelto, in ora locale della località. "ora" = istante attuale secondo Open-Meteo.
+function pioggiaFinestra(cfg, ora) {
+  const adesso = pioggiaMs(ora);
+  if (isNaN(adesso)) return null;
+  const ore = { '24h': 24, '7d': 168, '30d': 720 }[cfg.tipo];
+  let da, a;
+  if (ore) {
+    da = adesso - ore * PIOGGIA_MS_ORA;
+    a = adesso;
+  } else if (cfg.tipo === 'all') {
+    da = pioggiaMs(cfg.da);
+    a = adesso;
+  } else {                                   // personalizzato: la fine non va oltre adesso (ore future = previsioni)
+    da = pioggiaMs(cfg.da);
+    a = Math.min(pioggiaMs(cfg.a), adesso);
+  }
+  if (isNaN(da) || isNaN(a) || a <= da) return null;
+  return { da: pioggiaFmt(da), a: pioggiaFmt(a) };
+}
+
+// Somma dei valori orari con orario t tale che da < t <= a. Le stringhe "YYYY-MM-DDTHH:MM" si confrontano come testo.
+function pioggiaSomma(serie, da, a) {
+  let totale = 0;
+  let ore = 0;
+  for (const [t, v] of serie) {
+    if (typeof v === 'number' && t > da && t <= a) {
+      totale += v;
+      ore++;
+    }
+  }
+  return ore > 0 ? Math.round(totale * 10) / 10 : null;
+}
+
+// Ultima ora conclusa: l'ultimo orario non successivo a "ora" (es. alle 17:15 -> 17:00, cioè 16:00-17:00)
+function pioggiaUltimaOra(orari, valori, ora) {
+  let idx = -1;
+  orari.forEach((t, i) => { if (t <= ora && (idx < 0 || t > orari[idx])) idx = i; });
+  if (idx < 0 || typeof valori[idx] !== 'number') return null;
+  return {
+    valore: valori[idx],
+    da: pioggiaFmt(pioggiaMs(orari[idx]) - PIOGGIA_MS_ORA).slice(11, 16),
+    a: orari[idx].slice(11, 16),
+  };
+}
+
+function pioggiaFmtMm(v) {
+  return `${Math.round(v * 10) / 10} mm`;
+}
+
+async function pioggiaScarica(url) {
+  const res = await fetch(url);
+  if (!res.ok) throw new Error(`HTTP ${res.status}`);
+  const dati = await res.json();
+  if (dati.error) throw new Error(dati.reason || 'risposta di errore da Open-Meteo');
+  return dati;
+}
+
+// Scarica i dati orari che coprono il periodo e restituisce { totale, parziale, ultimaOra, finestra }.
+async function pioggiaDati(cfg, lat, lon) {
+  const base = `latitude=${lat}&longitude=${lon}&hourly=precipitation&timezone=auto`;
+
+  // Giorni da coprire all'indietro: serve solo per dimensionare la richiesta (con un po' di margine)
+  const giorniFissi = { '24h': 1, '7d': 7, '30d': 30 }[cfg.tipo];
+  const giorni = giorniFissi !== undefined
+    ? giorniFissi
+    : Math.ceil((Date.now() - new Date(cfg.da || Date.now()).getTime()) / 86400000);
+  const pastDays = Math.min(PIOGGIA_MAX_GIORNI_RECENTI, Math.max(2, giorni + 2));
+
+  // 1. Dati recenti (e "adesso" secondo l'ora locale della località)
+  const rec = await pioggiaScarica(
+    `https://api.open-meteo.com/v1/forecast?${base}&current=precipitation&past_days=${pastDays}&forecast_days=1`);
+  const orari = rec.hourly && rec.hourly.time;
+  const valori = rec.hourly && rec.hourly.precipitation;
+  const ora = rec.current && rec.current.time;
+  if (!Array.isArray(orari) || !Array.isArray(valori) || typeof ora !== 'string') {
+    throw new Error('risposta di Open-Meteo senza dati orari');
+  }
+
+  const serie = new Map();
+  orari.forEach((t, i) => serie.set(t, valori[i]));
+  const finestra = pioggiaFinestra(cfg, ora);
+  const risultato = { totale: null, parziale: false, ultimaOra: pioggiaUltimaOra(orari, valori, ora), finestra };
+  if (!finestra) return risultato;
+
+  // 2. Parte più vecchia di quella coperta dall'API forecast: archivio storico
+  const primoGiorno = orari[0].slice(0, 10);
+  if (finestra.da.slice(0, 10) < primoGiorno) {
+    const giornoPrima = pioggiaFmt(pioggiaMs(primoGiorno + 'T00:00') - 86400000).slice(0, 10);
+    const fine = finestra.a.slice(0, 10) < giornoPrima ? finestra.a.slice(0, 10) : giornoPrima;
+    try {
+      const arch = await pioggiaScarica(
+        `https://archive-api.open-meteo.com/v1/archive?${base}&start_date=${finestra.da.slice(0, 10)}&end_date=${fine}`);
+      const ao = arch.hourly && arch.hourly.time;
+      const av = arch.hourly && arch.hourly.precipitation;
+      if (!Array.isArray(ao) || !Array.isArray(av)) throw new Error('archivio senza dati orari');
+      ao.forEach((t, i) => { if (!serie.has(t)) serie.set(t, av[i]); });
+    } catch (e) {
+      console.error('Pioggia: archivio storico non disponibile:', e);
+      risultato.parziale = true;           // il totale conta solo la parte recente: è un minimo
+    }
+  }
+
+  risultato.totale = pioggiaSomma(serie, finestra.da, finestra.a);
+  return risultato;
+}
+
+async function caricaPioggiaTuya() {
+  const card = document.getElementById('pioggia-card');
+  if (!card || typeof WEATHER_CONFIG === 'undefined' || typeof PIOGGIA_CONFIG === 'undefined') return;
+  const el = id => document.getElementById(id);
+  const nota = 'Dati del modello meteo Open-Meteo, non misurati nel tuo giardino: un rovescio locale può non comparire. ';
+
+  try {
+    const r = await pioggiaDati(PIOGGIA_CONFIG, WEATHER_CONFIG.lat, WEATHER_CONFIG.lon);
+
+    el('pioggia-ora').textContent = r.ultimaOra ? pioggiaFmtMm(r.ultimaOra.valore) : '—';
+    el('pioggia-ora-label').textContent = r.ultimaOra
+      ? `ultima ora · ${r.ultimaOra.da}–${r.ultimaOra.a}` : 'ultima ora';
+    el('pioggia-periodo').textContent = r.totale === null ? '—' : (r.parziale ? '≥ ' : '') + pioggiaFmtMm(r.totale);
+
+    card.title = nota
+      + '«Ultima ora» è l\'ultima ora conclusa (somma delle precipitazioni nell\'ora indicata). '
+      + (r.finestra ? `«Periodo» somma le ore dal ${r.finestra.da.replace('T', ' ')} al ${r.finestra.a.replace('T', ' ')}. `
+                    : '«Periodo» non calcolabile: nessun dato nel periodo scelto. ')
+      + (r.parziale ? 'Archivio storico non raggiungibile: il totale conta solo i giorni più recenti, quindi è un minimo.' : '');
+  } catch (e) {
+    console.error('Errore pioggia Open-Meteo:', e);
+    el('pioggia-ora').textContent = 'n.d.';
+    el('pioggia-periodo').textContent = 'n.d.';
+    card.title = `Open-Meteo non raggiungibile (${e.message}).`;
   }
 }
