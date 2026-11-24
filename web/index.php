@@ -13,13 +13,14 @@ date_default_timezone_set('Europe/Rome');
 define('COOKIE_NAME', 'weather_cfg');
 define('COOKIE_TTL',  60 * 60 * 24 * 365);
 
+
 function load_config(): array {
   $defaults = [
     'city'          => 'Imperia',
     'lat'           => 43.88,
     'lon'           => 8.03,
     'theme'         => 'system',
-    'setup_done'    => false,
+    'setup_done'    => true,
     'weze_geoid'    => 74033,
     'forecast_days' => 7,
   ];
@@ -31,7 +32,7 @@ function load_config(): array {
     'lat'           => (float)($cfg['lat']   ?? $defaults['lat']),
     'lon'           => (float)($cfg['lon']   ?? $defaults['lon']),
     'theme'         => in_array(($cfg['theme'] ?? 'system'), ['system', 'light', 'dark'], true) ? $cfg['theme'] : $defaults['theme'],
-    'setup_done'    => (bool)($cfg['setup_done'] ?? false),
+    'setup_done'    => (bool)($cfg['setup_done'] ?? true),
     'weze_geoid'    => (int)($_POST['weze_geoid'] ?? $cfg['weze_geoid'] ?? $defaults['weze_geoid']),
     'forecast_days' => (int)($_POST['forecast_days'] ?? $cfg['forecast_days'] ?? $defaults['forecast_days']),
   ];
