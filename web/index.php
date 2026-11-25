@@ -580,12 +580,55 @@ if ($sensoreEsterno) {
     }
 }
 
-// Colore della heatmap: dal blu (freddo) al rosso (caldo) passando per ciano, verde e giallo
-function coloreHeat(float $v, float $min, float $max): string {
-    $t = $max > $min ? ($v - $min) / ($max - $min) : 0.5;
-    $t = max(0.0, min(1.0, $t));
-    $hue = (1.0 - $t) * 240; // 240 = blu, 0 = rosso
-    return sprintf('hsl(%d, 75%%, 48%%)', (int)round($hue));
+// Colore della heatmap: scala ASSOLUTA (un grado ha sempre lo stesso colore, qualunque sia il periodo).
+// Ogni fascia ha un colore al suo centro e tra un centro e l'altro si sfuma in modo continuo (niente scalini).
+// Fasce: <0 viola · 0-5 bianco · 5-10 bianco-azzurro · 10-14 azzurro chiaro · 14-17 celeste · 17-20 verde-azzurro
+//        20-23 verde · 23-27 giallo · 27-32 arancio · >32 rosso (oltre 38 rosso scuro)
+const HEAT_STOPS = [
+    [-5.0, [123, 44, 191]],   // viola
+    [ 0.0, [236, 228, 245]],  // bianco con un velo di viola
+    [ 2.5, [255, 255, 255]],  // bianco
+    [ 7.5, [227, 242, 251]],  // bianco-azzurro
+    [12.0, [159, 214, 242]],  // azzurro chiaro
+    [15.5, [ 78, 201, 230]],  // celeste
+    [18.5, [ 63, 201, 168]],  // verde-azzurro
+    [21.5, [ 92, 196,  90]],  // verde
+    [25.0, [243, 221,  59]],  // giallo
+    [29.5, [245, 138,  31]],  // arancio
+    [34.0, [215,  25,  28]],  // rosso
+    [38.0, [140,  10,  20]],  // rosso scuro
+];
+
+function coloreHeat(float $v): string {
+    $stops = HEAT_STOPS;
+    $n = count($stops);
+    if ($v <= $stops[0][0]) { $c = $stops[0][1]; }
+    elseif ($v >= $stops[$n - 1][0]) { $c = $stops[$n - 1][1]; }
+    else {
+        $c = $stops[0][1];
+        for ($i = 1; $i < $n; $i++) {
+            if ($v <= $stops[$i][0]) {
+                [$t0, $c0] = $stops[$i - 1];
+                [$t1, $c1] = $stops[$i];
+                $f = ($v - $t0) / ($t1 - $t0);
+                $c = [];
+                for ($k = 0; $k < 3; $k++) { $c[$k] = (int)round($c0[$k] + ($c1[$k] - $c0[$k]) * $f); }
+                break;
+            }
+        }
+    }
+    return sprintf('rgb(%d,%d,%d)', $c[0], $c[1], $c[2]);
+}
+
+// Barra della legenda: gradiente CSS con gli stessi colori, posizionati sulla scala assoluta
+function heatLegendaGradiente(): string {
+    $a = HEAT_STOPS[0][0];
+    $b = HEAT_STOPS[count(HEAT_STOPS) - 1][0];
+    $parti = [];
+    foreach (HEAT_STOPS as [$t, $c]) {
+        $parti[] = sprintf('rgb(%d,%d,%d) %.1f%%', $c[0], $c[1], $c[2], ($t - $a) / ($b - $a) * 100);
+    }
+    return 'linear-gradient(to right, ' . implode(', ', $parti) . ')';
 }
 
 function fmtGiorno(string $ymd): string { return date('d/m', strtotime($ymd)); }
@@ -641,10 +684,15 @@ function batteryLabel($battery): string { return match (strtolower(trim((string)
   .tuya-heat { display: grid; grid-template-columns: 48px repeat(24, minmax(14px, 1fr)); gap: 1px; min-width: 460px; font-size: 0.64rem; }
   .tuya-heat .h-ora, .tuya-heat .h-giorno { opacity: 0.7; text-align: center; line-height: 14px; }
   .tuya-heat .h-giorno { text-align: right; padding-right: 6px; }
-  .tuya-heat .h-cella { height: 14px; border-radius: 2px; }
+  .tuya-heat .h-cella { height: 14px; border-radius: 2px; box-shadow: inset 0 0 0 1px rgba(128,128,128,0.18); }
   .tuya-heat .h-cella.vuota { background: rgba(128,128,128,0.15); }
   .tuya-heat-legend { display: flex; align-items: center; gap: 8px; margin-top: 8px; font-size: 0.72rem; }
-  .tuya-heat-legend .barra { flex: 0 0 160px; height: 10px; border-radius: 5px; background: linear-gradient(to right, hsl(240,75%,48%), hsl(180,75%,48%), hsl(120,75%,48%), hsl(60,75%,48%), hsl(0,75%,48%)); }
+  .tuya-heat-legend { flex-wrap: wrap; }
+  .tuya-heat-scala { flex: 0 1 320px; min-width: 200px; }
+  .tuya-heat-legend .barra { height: 10px; border-radius: 5px; box-shadow: inset 0 0 0 1px rgba(128,128,128,0.25); }
+  .tuya-heat-scala .tacche { position: relative; height: 14px; }
+  .tuya-heat-scala .tacche span { position: absolute; transform: translateX(-50%); font-size: 0.64rem; opacity: 0.7; }
+  .tuya-heat-nota { opacity: 0.75; }
 </style>
 <link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
 <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
@@ -888,7 +936,7 @@ function batteryLabel($battery): string { return match (strtolower(trim((string)
               <div class="h-giorno"><?= fmtGiorno($giorno) ?></div>
               <?php for ($o = 0; $o < 24; $o++): ?>
                 <?php if (isset($ore[$o])): ?>
-                  <div class="h-cella" style="background:<?= coloreHeat($ore[$o], (float)$heatMin, (float)$heatMax) ?>" title="<?= fmtGiorno($giorno) ?> ore <?= $o ?>: <?= fmtNum($ore[$o]) ?> °C"></div>
+                  <div class="h-cella" style="background:<?= coloreHeat((float)$ore[$o]) ?>" title="<?= fmtGiorno($giorno) ?> ore <?= $o ?>: <?= fmtNum($ore[$o]) ?> °C"></div>
                 <?php else: ?>
                   <div class="h-cella vuota" title="<?= fmtGiorno($giorno) ?> ore <?= $o ?>: nessun dato"></div>
                 <?php endif; ?>
@@ -897,7 +945,15 @@ function batteryLabel($battery): string { return match (strtolower(trim((string)
           </div>
         </div>
         <div class="tuya-heat-legend">
-          <span><?= fmtNum($heatMin) ?> °C</span><div class="barra"></div><span><?= fmtNum($heatMax) ?> °C</span>
+          <div class="tuya-heat-scala">
+            <div class="barra" style="background: <?= heatLegendaGradiente() ?>"></div>
+            <div class="tacche">
+              <?php foreach ([0, 5, 10, 15, 20, 25, 30, 35] as $tk): ?>
+                <span style="left: <?= round(($tk + 5) / 43 * 100, 2) ?>%"><?= $tk ?></span>
+              <?php endforeach; ?>
+            </div>
+          </div>
+          <span class="tuya-heat-nota">scala fissa in °C · nel periodo: <?= fmtNum($heatMin) ?> … <?= fmtNum($heatMax) ?> °C</span>
         </div>
       </details>
     </div>
