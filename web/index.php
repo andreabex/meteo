@@ -581,22 +581,21 @@ if ($sensoreEsterno) {
 }
 
 // Colore della heatmap: scala ASSOLUTA (un grado ha sempre lo stesso colore, qualunque sia il periodo).
-// Ogni fascia ha un colore al suo centro e tra un centro e l'altro si sfuma in modo continuo (niente scalini).
-// Fasce: <0 viola · 0-5 bianco · 5-10 bianco-azzurro · 10-14 azzurro chiaro · 14-17 celeste · 17-20 verde-azzurro
-//        20-23 verde · 23-27 giallo · 27-32 arancio · >32 rosso (oltre 38 rosso scuro)
+// I colori sono ancorati a una temperatura e tra un'ancora e l'altra si sfuma in modo continuo (niente scalini).
+// Dal freddo al caldo: viola (sotto zero) · blu intenso (~0-2) · azzurro · celeste (~13) · verde-azzurro (~16)
+//   verde (~19) · giallo (~23) · arancio (~27) · rosso (da ~32, oltre 36 rosso scuro)
 const HEAT_STOPS = [
     [-5.0, [123, 44, 191]],   // viola
-    [ 0.0, [236, 228, 245]],  // bianco con un velo di viola
-    [ 2.5, [255, 255, 255]],  // bianco
-    [ 7.5, [227, 242, 251]],  // bianco-azzurro
-    [12.0, [159, 214, 242]],  // azzurro chiaro
-    [15.5, [ 78, 201, 230]],  // celeste
-    [18.5, [ 63, 201, 168]],  // verde-azzurro
-    [21.5, [ 92, 196,  90]],  // verde
-    [25.0, [243, 221,  59]],  // giallo
-    [29.5, [245, 138,  31]],  // arancio
-    [34.0, [215,  25,  28]],  // rosso
-    [38.0, [140,  10,  20]],  // rosso scuro
+    [-1.0, [ 82, 52, 205]],   // viola-blu
+    [ 2.0, [ 30, 64, 214]],   // blu intenso
+    [ 7.5, [ 40, 130, 225]],  // azzurro
+    [13.5, [ 78, 201, 230]],  // celeste
+    [16.5, [ 63, 201, 168]],  // verde-azzurro
+    [19.5, [ 92, 196,  90]],  // verde
+    [23.0, [243, 221,  59]],  // giallo
+    [27.5, [245, 138,  31]],  // arancio
+    [32.0, [215,  25,  28]],  // rosso
+    [36.0, [140,  10,  20]],  // rosso scuro
 ];
 
 function coloreHeat(float $v): string {
@@ -949,7 +948,7 @@ function batteryLabel($battery): string { return match (strtolower(trim((string)
             <div class="barra" style="background: <?= heatLegendaGradiente() ?>"></div>
             <div class="tacche">
               <?php foreach ([0, 5, 10, 15, 20, 25, 30, 35] as $tk): ?>
-                <span style="left: <?= round(($tk + 5) / 43 * 100, 2) ?>%"><?= $tk ?></span>
+                <span style="left: <?= round(($tk - HEAT_STOPS[0][0]) / (HEAT_STOPS[count(HEAT_STOPS) - 1][0] - HEAT_STOPS[0][0]) * 100, 2) ?>%"><?= $tk ?></span>
               <?php endforeach; ?>
             </div>
           </div>
